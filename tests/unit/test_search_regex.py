@@ -1,9 +1,8 @@
-"""Unit tests for regex search in search_symbols_by_name (with and without functions_only)."""
+"""Unit tests for regex search in search_symbols (with and without kinds filter)."""
 
 from unittest.mock import Mock
 
-import pytest
-
+from pyghidra_mcp.models import SymbolKind
 from pyghidra_mcp.tools import GhidraTools
 
 
@@ -58,7 +57,7 @@ def _make_tools(functions=None, symbols=None):
 
 
 class TestSearchFunctionsOnly:
-    """Tests for search_symbols_by_name with functions_only=True."""
+    """Tests for search_symbols filtered to kinds=[SymbolKind.FUNCTIONS]."""
 
     def _funcs(self):
         return [
@@ -72,7 +71,7 @@ class TestSearchFunctionsOnly:
     def test_plain_substring_still_works(self):
         """Plain substring query works as before (it's valid regex too)."""
         tools = _make_tools(functions=self._funcs())
-        results = tools.search_symbols_by_name("function", functions_only=True)
+        results = tools.search_symbols("function", kinds=[SymbolKind.FUNCTIONS])
         names = [s.name for s in results]
         assert "function_one" in names
         assert "function_two" in names
@@ -80,7 +79,7 @@ class TestSearchFunctionsOnly:
     def test_regex_exact_match(self):
         """^main$ matches only 'main', not '_main_init'."""
         tools = _make_tools(functions=self._funcs())
-        results = tools.search_symbols_by_name("^main$", functions_only=True)
+        results = tools.search_symbols("^main$", kinds=[SymbolKind.FUNCTIONS])
         names = [s.name for s in results]
         assert names == ["main"]
 
@@ -88,13 +87,13 @@ class TestSearchFunctionsOnly:
         """.* matches every function."""
         funcs = self._funcs()
         tools = _make_tools(functions=funcs)
-        results = tools.search_symbols_by_name(".*", functions_only=True)
+        results = tools.search_symbols(".*", kinds=[SymbolKind.FUNCTIONS])
         assert len(results) == len(funcs)
 
     def test_regex_pattern_with_groups(self):
         """func.*(one|two) matches function_one and function_two."""
         tools = _make_tools(functions=self._funcs())
-        results = tools.search_symbols_by_name("func.*(one|two)", functions_only=True)
+        results = tools.search_symbols("func.*(one|two)", kinds=[SymbolKind.FUNCTIONS])
         names = [s.name for s in results]
         assert "function_one" in names
         assert "function_two" in names
@@ -103,7 +102,7 @@ class TestSearchFunctionsOnly:
     def test_regex_case_insensitive(self):
         """Search is case-insensitive."""
         tools = _make_tools(functions=self._funcs())
-        results = tools.search_symbols_by_name("^MAIN$", functions_only=True)
+        results = tools.search_symbols("^MAIN$", kinds=[SymbolKind.FUNCTIONS])
         names = [s.name for s in results]
         assert names == ["main"]
 
@@ -111,7 +110,7 @@ class TestSearchFunctionsOnly:
         """Anchored matches should work against display names, not just qualified names."""
         funcs = [_make_mock_function("entry", "0x1000", qualified_name="Global::entry")]
         tools = _make_tools(functions=funcs)
-        results = tools.search_symbols_by_name("^entry$", functions_only=True)
+        results = tools.search_symbols("^entry$", kinds=[SymbolKind.FUNCTIONS])
         names = [s.name for s in results]
         assert names == ["entry"]
 
@@ -119,7 +118,7 @@ class TestSearchFunctionsOnly:
         """Invalid regex like bare '*' falls back to substring match."""
         tools = _make_tools(functions=self._funcs())
         # '*' is invalid regex but also not a substring of any name -> empty
-        results = tools.search_symbols_by_name("*", functions_only=True)
+        results = tools.search_symbols("*", kinds=[SymbolKind.FUNCTIONS])
         assert results == []
 
     def test_invalid_regex_substring_match(self):
@@ -127,41 +126,42 @@ class TestSearchFunctionsOnly:
         funcs = [_make_mock_function("test[func", "0x5000")]
         tools = _make_tools(functions=funcs)
         # '[func' is invalid regex, falls back to substring
-        results = tools.search_symbols_by_name("[func", functions_only=True)
+        results = tools.search_symbols("[func", kinds=[SymbolKind.FUNCTIONS])
         names = [s.name for s in results]
         assert names == ["test[func"]
 
     def test_regex_metachar_uses_get_all_functions(self):
         """When query has regex metacharacters, uses get_all_functions."""
         tools = _make_tools(functions=self._funcs())
-        tools.search_symbols_by_name("^main$", functions_only=True)
+        tools.search_symbols("^main$", kinds=[SymbolKind.FUNCTIONS])
         tools.get_all_functions.assert_called_once_with(True)
         tools.find_functions.assert_not_called()
 
     def test_plain_query_uses_find_functions(self):
         """When query is plain text, uses find_functions (pre-filter)."""
         tools = _make_tools(functions=self._funcs())
-        tools.search_symbols_by_name("main", functions_only=True)
+        tools.search_symbols("main", kinds=[SymbolKind.FUNCTIONS])
         tools.find_functions.assert_called_once_with("main")
         tools.get_all_functions.assert_not_called()
 
-    def test_empty_query_raises(self):
-        """Empty query raises ValueError."""
-        tools = _make_tools(functions=[])
-        with pytest.raises(ValueError, match="Query string is required"):
-            tools.search_symbols_by_name("", functions_only=True)
+    def test_empty_query_defaults_to_dot_star(self):
+        """Empty query is coerced to ``.*`` and returns all functions."""
+        funcs = self._funcs()
+        tools = _make_tools(functions=funcs)
+        results = tools.search_symbols("", kinds=[SymbolKind.FUNCTIONS])
+        assert len(results) == len(funcs)
 
     def test_offset_and_limit(self):
         """Offset and limit pagination works with regex."""
         tools = _make_tools(functions=self._funcs())
-        all_results = tools.search_symbols_by_name(".*", functions_only=True)
-        page = tools.search_symbols_by_name(".*", functions_only=True, offset=1, limit=2)
+        all_results = tools.search_symbols(".*", kinds=[SymbolKind.FUNCTIONS])
+        page = tools.search_symbols(".*", kinds=[SymbolKind.FUNCTIONS], offset=1, limit=2)
         assert len(page) == 2
         assert page == all_results[1:3]
 
 
 class TestSearchAllSymbols:
-    """Tests for search_symbols_by_name with functions_only=False (default)."""
+    """Tests for search_symbols with kinds=None (default)."""
 
     def _syms(self):
         return [
@@ -174,7 +174,7 @@ class TestSearchAllSymbols:
     def test_regex_exact_match(self):
         """^printf$ matches only 'printf'."""
         tools = _make_tools(symbols=self._syms())
-        results = tools.search_symbols_by_name("^printf$")
+        results = tools.search_symbols("^printf$")
         names = [s.name for s in results]
         assert names == ["printf"]
 
@@ -182,31 +182,31 @@ class TestSearchAllSymbols:
         """.* matches every symbol."""
         syms = self._syms()
         tools = _make_tools(symbols=syms)
-        results = tools.search_symbols_by_name(".*")
+        results = tools.search_symbols(".*")
         assert len(results) == len(syms)
 
     def test_regex_metachar_uses_get_all_symbols(self):
         """Regex query uses get_all_symbols."""
         tools = _make_tools(symbols=self._syms())
-        tools.search_symbols_by_name("^main$")
+        tools.search_symbols("^main$")
         tools.get_all_symbols.assert_called_once_with(True)
         tools.find_symbols.assert_not_called()
 
     def test_plain_query_uses_find_symbols(self):
         """Plain query uses find_symbols."""
         tools = _make_tools(symbols=self._syms())
-        tools.search_symbols_by_name("main")
+        tools.search_symbols("main")
         tools.find_symbols.assert_called_once_with("main")
         tools.get_all_symbols.assert_not_called()
 
     def test_invalid_regex_falls_back(self):
         """Invalid regex falls back to substring."""
         tools = _make_tools(symbols=self._syms())
-        results = tools.search_symbols_by_name("*")
+        results = tools.search_symbols("*")
         assert results == []
 
     def test_default_is_all_symbols(self):
-        """Default (no functions_only) searches all symbols."""
+        """Default (no kinds filter) searches all symbols."""
         tools = _make_tools(symbols=self._syms())
-        tools.search_symbols_by_name("main")
+        tools.search_symbols("main")
         tools.find_symbols.assert_called_once()

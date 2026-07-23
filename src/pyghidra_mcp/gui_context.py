@@ -7,13 +7,13 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from pyghidra_mcp.context import ProgramInfo
+from pyghidra_mcp.context import ProgramInfo, is_program_analysis_complete
 from pyghidra_mcp.decompiler_pool import DecompilerPool
 from pyghidra_mcp.import_detection import is_ghidra_importable
 from pyghidra_mcp.import_planning import ImportCandidate, build_import_plan
 from pyghidra_mcp.indexing_mixin import IndexingMixin
 from pyghidra_mcp.models import (
-    ImportRequestResult,
+    ImportBinaryResponse,
     ProgramInfo as ProgramInfoModel,
     SkippedImport as SkippedImportModel,
 )
@@ -65,6 +65,10 @@ class GuiPyGhidraContext(IndexingMixin):
         self._programs_lock = threading.RLock()
         self.import_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self._init_indexing_state(self.pyghidra_mcp_dir, threaded=True)
+
+        from pyghidra_mcp.script_jobs import ScriptJobRegistry
+
+        self.script_jobs = ScriptJobRegistry()
 
         self.project = self.wait_for_gui_ready(
             project_spec,
@@ -182,18 +186,18 @@ class GuiPyGhidraContext(IndexingMixin):
                 )
             return results
 
-    def open_program_in_gui(self, binary_name: str, *, current: bool = False) -> dict[str, Any]:
+    def open_program_in_gui(self, program_name: str, *, current: bool = False) -> dict[str, Any]:
         from ghidra.app.services import ProgramManager
         from ghidra.framework.model import DomainFile
 
-        domain_file = self._find_domain_file(binary_name)
+        domain_file = self._find_domain_file(program_name)
         program_manager = self._get_primary_program_manager(required=False)
         if program_manager is None:
             from java.util import List  # type: ignore
 
             tool = self.project.getToolServices().launchDefaultTool(List.of(domain_file))
             if tool is None:
-                raise RuntimeError(f"Failed to launch a Ghidra tool for {binary_name}")
+                raise RuntimeError(f"Failed to launch a Ghidra tool for {program_name}")
             program_manager = self._get_primary_program_manager()
 
         assert program_manager is not None
@@ -219,15 +223,15 @@ class GuiPyGhidraContext(IndexingMixin):
 
         raise RuntimeError(f"Timed out waiting for GUI to open program {expected_path}")
 
-    def set_current_program(self, binary_name: str) -> dict[str, Any]:
-        return self.open_program_in_gui(binary_name, current=True)
+    def set_current_program(self, program_name: str) -> dict[str, Any]:
+        return self.open_program_in_gui(program_name, current=True)
 
     def run_on_swing(self, fn, *args, **kwargs):
         return _run_on_swing(fn, *args, **kwargs)
 
-    def goto(self, binary_name: str, target: str, target_type: str) -> dict[str, Any]:
+    def goto(self, program_name: str, target: str, target_type: str) -> dict[str, Any]:
         normalized_type = target_type.lower()
-        program_info = self._resolve_program_info(binary_name)
+        program_info = self._resolve_program_info(program_name)
 
         if normalized_type == "function":
             from pyghidra_mcp.tools import GhidraTools
@@ -254,7 +258,7 @@ class GuiPyGhidraContext(IndexingMixin):
 
         success = bool(self.run_on_swing(do_goto))
         return {
-            "binary_name": binary_name,
+            "program_name": program_name,
             "address": str(address_obj),
             "success": success,
         }
@@ -292,12 +296,12 @@ class GuiPyGhidraContext(IndexingMixin):
             return fallback_tool
         raise RuntimeError("No Ghidra tool with ProgramManager is available.")
 
-    def _find_domain_file(self, binary_name: str):
+    def _find_domain_file(self, program_name: str):
         matches = []
         for domain_file in self.list_binary_domain_files():
             path = str(domain_file.getPathname())
             name = str(domain_file.getName())
-            if binary_name in {path, name, Path(path).name}:
+            if program_name in {path, name, Path(path).name}:
                 matches.append(domain_file)
 
         if len(matches) == 1:
@@ -305,9 +309,9 @@ class GuiPyGhidraContext(IndexingMixin):
         if len(matches) > 1:
             paths = [str(domain_file.getPathname()) for domain_file in matches]
             raise ValueError(
-                f"Binary name '{binary_name}' is ambiguous. Use one of these paths: {paths}"
+                f"Binary name '{program_name}' is ambiguous. Use one of these paths: {paths}"
             )
-        raise ValueError(f"Binary {binary_name} not found in project.")
+        raise ValueError(f"Binary {program_name} not found in project.")
 
     @staticmethod
     def _parse_address(program, address: str):
@@ -328,12 +332,7 @@ class GuiPyGhidraContext(IndexingMixin):
 
         return list_folder_domain_files(folder)
 
-    def list_program_infos(self) -> list[ProgramInfo]:
-        self.refresh_programs()
-        with self._programs_lock:
-            return list(self.programs.values())
-
-    def list_project_binary_infos(self) -> list[ProgramInfoModel]:
+    def list_program_infos(self) -> list[ProgramInfoModel]:
         self.refresh_programs()
         with self._programs_lock:
             live_programs = dict(self.programs)
@@ -372,15 +371,15 @@ class GuiPyGhidraContext(IndexingMixin):
             )
         return program_infos
 
-    def get_program_info(self, binary_name: str) -> ProgramInfo:
-        program_info = self._resolve_program_info(binary_name)
+    def get_program_info(self, program_name: str) -> ProgramInfo:
+        program_info = self._resolve_program_info(program_name)
 
         if not program_info.analysis_complete:
             raise RuntimeError(
                 json.dumps(
                     {
-                        "message": f"Analysis incomplete for binary '{binary_name}'.",
-                        "binary_name": binary_name,
+                        "message": f"Analysis incomplete for binary '{program_name}'.",
+                        "program_name": program_name,
                         "ghidra_analysis_complete": program_info.ghidra_analysis_complete,
                         "code_indexed": program_info.code_collection is not None,
                         "strings_indexed": program_info.strings is not None,
@@ -388,28 +387,28 @@ class GuiPyGhidraContext(IndexingMixin):
                     }
                 )
             )
-        self.schedule_indexing(binary_name)
+        self.schedule_indexing(program_name)
         return program_info
 
-    def _resolve_program_info(self, binary_name: str) -> ProgramInfo:
+    def _resolve_program_info(self, program_name: str) -> ProgramInfo:
         self.refresh_programs()
         with self._programs_lock:
-            program_info = self.programs.get(binary_name)
+            program_info = self.programs.get(program_name)
             if program_info is None:
-                program_info = self._get_unique_short_name_match(binary_name)
+                program_info = self._get_unique_short_name_match(program_name)
 
             if program_info is None:
                 available_progs = list(self.programs.keys())
                 try:
-                    opened_info = self.open_program_in_gui(binary_name)
+                    opened_info = self.open_program_in_gui(program_name)
                 except ValueError:
                     raise ValueError(
-                        f"Binary {binary_name} not found. Available binaries: {available_progs}"
+                        f"Binary {program_name} not found. Available binaries: {available_progs}"
                     ) from None
                 program_info = self.programs.get(opened_info["path"])
                 if program_info is None:
                     raise ValueError(
-                        f"Binary {binary_name} could not be opened. Available binaries: "
+                        f"Binary {program_name} could not be opened. Available binaries: "
                         f"{available_progs}"
                     )
         return program_info
@@ -497,7 +496,7 @@ class GuiPyGhidraContext(IndexingMixin):
         opened = self.open_program_in_gui(str(domain_file.getPathname()))
         return str(opened["path"])
 
-    def import_binary_backgrounded(self, binary_path: str | Path) -> ImportRequestResult:
+    def import_binary_backgrounded(self, binary_path: str | Path) -> ImportBinaryResponse:
         binary_path = Path(binary_path)
         if not binary_path.exists():
             raise FileNotFoundError(f"The file {binary_path} cannot be found")
@@ -518,7 +517,7 @@ class GuiPyGhidraContext(IndexingMixin):
             if queued_paths
             else f"No importable files were queued from {binary_path}."
         )
-        return ImportRequestResult(
+        return ImportBinaryResponse(
             requested_path=str(binary_path),
             queued_count=len(queued_paths),
             queued_paths=queued_paths,
@@ -532,13 +531,14 @@ class GuiPyGhidraContext(IndexingMixin):
         self.refresh_programs()
         with self._programs_lock:
             program_paths = list(self.programs)
-        for binary_name in program_paths:
-            self.schedule_indexing(binary_name)
+        for program_name in program_paths:
+            self.schedule_indexing(program_name)
 
     def close(self, save: bool = True) -> None:
         """Release MCP-owned resources. Does not close the GUI project or programs."""
         self.import_executor.shutdown(wait=True)
         self.shutdown_indexing()
+        self.script_jobs.close()
         with self._programs_lock:
             for program_info in self.programs.values():
                 self._dispose_decompiler(program_info)
@@ -556,14 +556,14 @@ class GuiPyGhidraContext(IndexingMixin):
         except Exception:
             logger.error("GUI background import failed.", exc_info=True)
 
-    def _get_unique_short_name_match(self, binary_name: str) -> ProgramInfo | None:
+    def _get_unique_short_name_match(self, program_name: str) -> ProgramInfo | None:
         matches: list[tuple[str, ProgramInfo]] = []
         for full_path, program_info in self.programs.items():
             domain_file = program_info.program.getDomainFile()
             names = {Path(full_path).name, program_info.name}
             if domain_file is not None:
                 names.add(str(domain_file.getName()))
-            if binary_name in names:
+            if program_name in names:
                 matches.append((full_path, program_info))
 
         if len(matches) == 1:
@@ -571,13 +571,13 @@ class GuiPyGhidraContext(IndexingMixin):
         if len(matches) > 1:
             paths = [path for path, _program_info in matches]
             raise ValueError(
-                f"Binary name '{binary_name}' is ambiguous. Use one of these paths: {paths}"
+                f"Binary name '{program_name}' is ambiguous. Use one of these paths: {paths}"
             )
         return None
 
-    def _lookup_program_info(self, binary_name: str) -> ProgramInfo | None:
+    def _lookup_program_info(self, program_name: str) -> ProgramInfo | None:
         try:
-            return self._resolve_program_info(binary_name)
+            return self._resolve_program_info(program_name)
         except ValueError:
             return None
 
@@ -607,17 +607,7 @@ class GuiPyGhidraContext(IndexingMixin):
         program_info.program = program
         program_info.metadata = metadata
         program_info.file_path = Path(executable_location) if executable_location else None
-        program_info.ghidra_analysis_complete = self._is_program_analysis_complete(program)
-
-    @staticmethod
-    def _is_program_analysis_complete(program) -> bool:
-        from ghidra.program.util import GhidraProgramUtilities
-
-        try:
-            return not bool(GhidraProgramUtilities.shouldAskToAnalyze(program))
-        except Exception:
-            logger.debug("Could not determine GUI program analysis state", exc_info=True)
-            return False
+        program_info.ghidra_analysis_complete = is_program_analysis_complete(program)
 
     @staticmethod
     def _setup_decompiler(program):

@@ -61,13 +61,13 @@ async def test_rename_variable_tool(variable_server_params, variable_test_binary
     async with stdio_client(variable_server_params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            binary_name = PyGhidraContext._gen_unique_bin_name(variable_test_binary)
+            program_name = PyGhidraContext._gen_unique_bin_name(variable_test_binary)
             symbols_result = await session.call_tool(
-                "search_symbols_by_name",
+                "search_symbols",
                 {
-                    "binary_name": binary_name,
+                    "program_name": program_name,
                     "query": "^helper$",
-                    "functions_only": True,
+                    "kinds": ["functions"],
                 },
             )
             symbols_payload = json.loads(symbols_result.content[0].text)
@@ -76,7 +76,7 @@ async def test_rename_variable_tool(variable_server_params, variable_test_binary
             rename_result = await session.call_tool(
                 "rename_variable",
                 {
-                    "binary_name": binary_name,
+                    "program_name": program_name,
                     "function_name_or_address": helper_name,
                     "variable_name": "count",
                     "new_name": "item_count",
@@ -91,7 +91,7 @@ async def test_rename_variable_tool(variable_server_params, variable_test_binary
             decompile_result = await session.call_tool(
                 "decompile_function",
                 {
-                    "binary_name": binary_name,
+                    "program_name": program_name,
                     "name_or_address": helper_name,
                 },
             )
@@ -104,13 +104,13 @@ async def test_set_variable_type_tool(variable_server_params, variable_test_bina
     async with stdio_client(variable_server_params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            binary_name = PyGhidraContext._gen_unique_bin_name(variable_test_binary)
+            program_name = PyGhidraContext._gen_unique_bin_name(variable_test_binary)
             symbols_result = await session.call_tool(
-                "search_symbols_by_name",
+                "search_symbols",
                 {
-                    "binary_name": binary_name,
+                    "program_name": program_name,
                     "query": "^helper$",
-                    "functions_only": True,
+                    "kinds": ["functions"],
                 },
             )
             symbols_payload = json.loads(symbols_result.content[0].text)
@@ -119,7 +119,7 @@ async def test_set_variable_type_tool(variable_server_params, variable_test_bina
             type_result = await session.call_tool(
                 "set_variable_type",
                 {
-                    "binary_name": binary_name,
+                    "program_name": program_name,
                     "function_name_or_address": helper_name,
                     "variable_name": "count",
                     "type_name": "long",
@@ -135,7 +135,7 @@ async def test_set_variable_type_tool(variable_server_params, variable_test_bina
             decompile_result = await session.call_tool(
                 "decompile_function",
                 {
-                    "binary_name": binary_name,
+                    "program_name": program_name,
                     "name_or_address": helper_name,
                 },
             )

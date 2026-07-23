@@ -16,10 +16,12 @@ async def test_list_exports(server_params_shared_object):
             # Initialize the connection
             await session.initialize()
 
-            binary_name = PyGhidraContext._gen_unique_bin_name(server_params_shared_object.args[-1])
+            program_name = PyGhidraContext._gen_unique_bin_name(
+                server_params_shared_object.args[-1]
+            )
 
             # Test without params
-            response = await session.call_tool("list_exports", {"binary_name": binary_name})
+            response = await session.call_tool("list_exports", {"program_name": program_name})
             export_infos = ExportInfos.model_validate_json(response.content[0].text)
             assert len(export_infos.exports) >= 2
             assert any("shared_func_one" in export.name for export in export_infos.exports)
@@ -28,14 +30,14 @@ async def test_list_exports(server_params_shared_object):
 
             # Test limit
             response = await session.call_tool(
-                "list_exports", {"binary_name": binary_name, "limit": 1}
+                "list_exports", {"program_name": program_name, "limit": 1}
             )
             export_infos = ExportInfos.model_validate_json(response.content[0].text)
             assert len(export_infos.exports) == 1
 
             # Test offset
             response = await session.call_tool(
-                "list_exports", {"binary_name": binary_name, "offset": 1, "limit": 1}
+                "list_exports", {"program_name": program_name, "offset": 1, "limit": 1}
             )
             export_infos = ExportInfos.model_validate_json(response.content[0].text)
             assert len(export_infos.exports) == 1
@@ -43,7 +45,7 @@ async def test_list_exports(server_params_shared_object):
 
             # Test query
             response = await session.call_tool(
-                "list_exports", {"binary_name": binary_name, "query": "shared_func_one"}
+                "list_exports", {"program_name": program_name, "query": "shared_func_one"}
             )
             export_infos = ExportInfos.model_validate_json(response.content[0].text)
             assert len(export_infos.exports) >= 1
@@ -51,7 +53,7 @@ async def test_list_exports(server_params_shared_object):
 
             # Test query with no results
             response = await session.call_tool(
-                "list_exports", {"binary_name": binary_name, "query": "non_existent_function"}
+                "list_exports", {"program_name": program_name, "query": "non_existent_function"}
             )
             export_infos = ExportInfos.model_validate_json(response.content[0].text)
             assert len(export_infos.exports) == 0

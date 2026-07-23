@@ -6,7 +6,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from pyghidra_mcp.context import PyGhidraContext
-from pyghidra_mcp.models import CodeSearchResults, DecompiledFunction
+from pyghidra_mcp.models import DecompiledFunction, SearchCodeResponse
 
 
 @pytest.fixture(scope="module")
@@ -67,12 +67,12 @@ async def test_search_code(server_params, func_prefix):
             # Initialize the connection
             await session.initialize()
 
-            binary_name = PyGhidraContext._gen_unique_bin_name(server_params.args[-1])
+            program_name = PyGhidraContext._gen_unique_bin_name(server_params.args[-1])
 
             # 1. Decompile a function to get its code to use as a query
             decompile_response = await session.call_tool(
                 "decompile_function",
-                {"binary_name": binary_name, "name_or_address": name},
+                {"program_name": program_name, "name_or_address": name},
             )
 
             decompiled_function = DecompiledFunction.model_validate_json(
@@ -82,10 +82,10 @@ async def test_search_code(server_params, func_prefix):
 
             # 2. Use the decompiled code to search for the function
             search_response = await session.call_tool(
-                "search_code", {"binary_name": binary_name, "query": query_code, "limit": 1}
+                "search_code", {"program_name": program_name, "query": query_code, "limit": 1}
             )
 
-            search_results = CodeSearchResults.model_validate_json(search_response.content[0].text)
+            search_results = SearchCodeResponse.model_validate_json(search_response.content[0].text)
 
             # 3. Assert the results
             assert len(search_results.results) > 0
@@ -114,7 +114,7 @@ async def test_search_code_literal(server_params):
             # Initialize the connection
             await session.initialize()
 
-            binary_name = PyGhidraContext._gen_unique_bin_name(server_params.args[-1])
+            program_name = PyGhidraContext._gen_unique_bin_name(server_params.args[-1])
 
             # Search for a literal string that should be in the decompiled code
             # "printf" should appear in the decompiled output
@@ -124,14 +124,14 @@ async def test_search_code_literal(server_params):
             search_response = await session.call_tool(
                 "search_code",
                 {
-                    "binary_name": binary_name,
+                    "program_name": program_name,
                     "query": literal_query,
                     "limit": 5,
                     "search_mode": "literal",
                 },
             )
 
-            search_results = CodeSearchResults.model_validate_json(search_response.content[0].text)
+            search_results = SearchCodeResponse.model_validate_json(search_response.content[0].text)
 
             # Assert the results
             assert search_results.search_mode.value == "literal"

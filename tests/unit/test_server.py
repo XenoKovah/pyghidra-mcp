@@ -20,7 +20,7 @@ def _common_kwargs():
         "threaded": True,
         "max_workers": 1,
         "wait_for_analysis": False,
-        "list_project_binaries": False,
+        "list_programs": False,
         "delete_project_binary": None,
         "symbols_path": None,
         "sym_file_path": None,

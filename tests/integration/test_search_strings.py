@@ -3,7 +3,7 @@ from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 
 from pyghidra_mcp.context import PyGhidraContext
-from pyghidra_mcp.models import StringSearchResults
+from pyghidra_mcp.models import SearchStringsResponse
 
 
 @pytest.mark.asyncio
@@ -16,12 +16,12 @@ async def test_search_strings_hello(server_params_no_thread):
             # Initialize the connection
             await session.initialize()
 
-            binary_name = PyGhidraContext._gen_unique_bin_name(server_params_no_thread.args[-1])
+            program_name = PyGhidraContext._gen_unique_bin_name(server_params_no_thread.args[-1])
 
             response = await session.call_tool(
-                "search_strings", {"binary_name": binary_name, "query": "hello"}
+                "search_strings", {"program_name": program_name, "query": "hello"}
             )
 
-            search_results = StringSearchResults.model_validate_json(response.content[0].text)
+            search_results = SearchStringsResponse.model_validate_json(response.content[0].text)
             assert len(search_results.strings) >= 1
             assert any("World" in s.value for s in search_results.strings)

@@ -5,7 +5,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from pyghidra_mcp.context import PyGhidraContext
-from pyghidra_mcp.models import StringSearchResults
+from pyghidra_mcp.models import SearchStringsResponse
 
 
 @pytest.fixture(scope="module")
@@ -34,14 +34,14 @@ async def test_background_indexing_eventually_enables_string_search(
         async with ClientSession(read, write) as session:
             await session.initialize()
 
-            binary_name = PyGhidraContext._gen_unique_bin_name(
+            program_name = PyGhidraContext._gen_unique_bin_name(
                 server_params_background_indexing.args[-1]
             )
 
             strings_indexed = False
             for _ in range(240):
-                response = await session.call_tool("list_project_binaries", {})
-                program = find_binary_in_list_response(response, binary_name)
+                response = await session.call_tool("list_programs", {})
+                program = find_binary_in_list_response(response, program_name)
                 if program and program["strings_indexed"]:
                     strings_indexed = True
                     break
@@ -51,7 +51,7 @@ async def test_background_indexing_eventually_enables_string_search(
 
             response = await session.call_tool(
                 "search_strings",
-                {"binary_name": binary_name, "query": "hello"},
+                {"program_name": program_name, "query": "hello"},
             )
-            search_results = StringSearchResults.model_validate_json(response.content[0].text)
+            search_results = SearchStringsResponse.model_validate_json(response.content[0].text)
             assert any("World" in result.value for result in search_results.strings)

@@ -130,7 +130,7 @@ async def test_gui_smoke(
         env=headless_env,
     )
 
-    binary_name = PyGhidraContext._gen_unique_bin_name(test_binary)
+    program_name = PyGhidraContext._gen_unique_bin_name(test_binary)
 
     async with stdio_client(headless_params) as (read, write):
         async with ClientSession(read, write) as session:
@@ -138,8 +138,8 @@ async def test_gui_smoke(
 
             ready = False
             for _ in range(240):
-                response = await session.call_tool("list_project_binaries", {})
-                program = find_binary_in_list_response(response, binary_name)
+                response = await session.call_tool("list_programs", {})
+                program = find_binary_in_list_response(response, program_name)
                 if program and program["analysis_complete"]:
                     ready = True
                     break
@@ -181,14 +181,14 @@ async def test_gui_smoke(
             async with ClientSession(read, write) as session:
                 await session.initialize()
 
-                binaries = await session.call_tool("list_project_binaries", {})
-                program = find_binary_in_list_response(binaries, binary_name)
+                binaries = await session.call_tool("list_programs", {})
+                program = find_binary_in_list_response(binaries, program_name)
                 assert program is not None
                 assert program["analysis_complete"] is True
 
                 opened = await session.call_tool(
                     "open_program_in_gui",
-                    {"binary_name": binary_name, "current": True},
+                    {"program_name": program_name, "current": True},
                 )
                 opened_payload = json.loads(opened.content[0].text)
                 assert opened_payload["current"] is True
@@ -197,7 +197,7 @@ async def test_gui_smoke(
                 goto_result = await session.call_tool(
                     "goto",
                     {
-                        "binary_name": binary_name,
+                        "program_name": program_name,
                         "target": main_func_name,
                         "target_type": "function",
                     },
@@ -208,7 +208,7 @@ async def test_gui_smoke(
                 comment_result = await session.call_tool(
                     "set_comment",
                     {
-                        "binary_name": binary_name,
+                        "program_name": program_name,
                         "target": main_func_name,
                         "comment_type": "decompiler",
                         "comment": "GUI smoke test comment.",

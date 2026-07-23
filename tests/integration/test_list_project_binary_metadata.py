@@ -4,13 +4,13 @@ import pytest
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 
-from pyghidra_mcp.models import ProgramInfos
+from pyghidra_mcp.models import ListProgramsResponse
 
 
 @pytest.mark.asyncio
-async def test_list_project_binary_metadata(server_params):
+async def test_get_program_metadata(server_params):
     """
-    Test the list_project_binary_metadata tool.
+    Test the get_program_metadata tool.
     """
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
@@ -18,17 +18,17 @@ async def test_list_project_binary_metadata(server_params):
             await session.initialize()
 
             # First, list binaries to get a valid binary name
-            tool_resp = await session.call_tool("list_project_binaries", {})
+            tool_resp = await session.call_tool("list_programs", {})
             program_infos_result = json.loads(tool_resp.content[0].text)
-            program_infos = ProgramInfos(**program_infos_result)
+            program_infos = ListProgramsResponse(**program_infos_result)
 
             assert program_infos is not None
             assert len(program_infos.programs) > 0
-            binary_name = program_infos.programs[0].name
+            program_name = program_infos.programs[0].name
 
             # Get the metadata
             tool_resp = await session.call_tool(
-                "list_project_binary_metadata", {"binary_name": binary_name}
+                "get_program_metadata", {"program_name": program_name}
             )
 
             assert tool_resp is not None
@@ -40,6 +40,6 @@ async def test_list_project_binary_metadata(server_params):
             assert metadata.get("Processor") is not None
             assert metadata.get("Endian") is not None
             assert metadata.get("Address Size") is not None
-            assert binary_name is not None
+            assert program_name is not None
             assert metadata.get("Program Name") is not None
-            assert metadata.get("Program Name") in binary_name
+            assert metadata.get("Program Name") in program_name

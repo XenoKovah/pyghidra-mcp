@@ -38,8 +38,8 @@ def test_client_error_exception():
 
 
 def test_binary_not_found_error_exception():
-    """Test BinaryNotFoundError exception."""
-    from pyghidra_mcp_cli.client import BinaryNotFoundError
+    """Test ProgramNotFoundError exception."""
+    from pyghidra_mcp_cli.client import ProgramNotFoundError
 
-    with pytest.raises(BinaryNotFoundError):
-        raise BinaryNotFoundError("Binary not found")
+    with pytest.raises(ProgramNotFoundError):
+        raise ProgramNotFoundError("Program not found")

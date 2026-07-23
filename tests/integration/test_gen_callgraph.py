@@ -3,7 +3,7 @@ from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 
 from pyghidra_mcp.context import PyGhidraContext
-from pyghidra_mcp.models import CallGraphResult
+from pyghidra_mcp.models import GenCallgraphResponse
 
 
 @pytest.mark.asyncio
@@ -18,11 +18,11 @@ async def test_gen_callgraph_tool(server_params, test_binary, func_prefix):
 
             # Call the gen_callgraph tool
 
-            binary_name = PyGhidraContext._gen_unique_bin_name(server_params.args[-1])
+            program_name = PyGhidraContext._gen_unique_bin_name(server_params.args[-1])
             results = await session.call_tool(
                 "gen_callgraph",
                 {
-                    "binary_name": binary_name,
+                    "program_name": program_name,
                     "function_name": name_two,
                     "direction": "calling",
                     "display_type": "flow",
@@ -41,7 +41,7 @@ async def test_gen_callgraph_tool(server_params, test_binary, func_prefix):
 
             data = text_content.strip()
             assert data.startswith("{") and data.endswith("}")
-            call_graph_data = CallGraphResult.model_validate_json(data)
+            call_graph_data = GenCallgraphResponse.model_validate_json(data)
 
             assert name_two in call_graph_data.function_name
             assert call_graph_data.direction == "calling"

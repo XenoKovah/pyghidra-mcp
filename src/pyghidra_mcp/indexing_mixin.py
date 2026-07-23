@@ -33,18 +33,18 @@ class IndexingMixin:
         if self.index_executor:
             self.index_executor.shutdown(wait=True)
 
-    def _lookup_program_info(self, binary_name: str) -> Any | None:
+    def _lookup_program_info(self, program_name: str) -> Any | None:
         raise NotImplementedError
 
     def schedule_indexing(
         self,
-        binary_name: str,
+        program_name: str,
         *,
         code: bool = True,
         strings: bool = True,
     ) -> bool:
         """Schedule MCP-side indexing for a binary when it is relevant."""
-        program_info = self._lookup_program_info(binary_name)
+        program_info = self._lookup_program_info(program_name)
         if program_info is None or not program_info.analysis_complete:
             return False
         if (not code or program_info.code_collection is not None) and (
@@ -53,7 +53,7 @@ class IndexingMixin:
             return False
 
         with self._index_lock:
-            future = self._index_futures.get(binary_name)
+            future = self._index_futures.get(program_name)
             if future is not None and not future.done():
                 return False
 
@@ -64,9 +64,9 @@ class IndexingMixin:
                     code=code,
                     strings=strings,
                 )
-                self._index_futures[binary_name] = future
+                self._index_futures[program_name] = future
                 future.add_done_callback(
-                    lambda done_future, name=binary_name: self._index_done_callback(
+                    lambda done_future, name=program_name: self._index_done_callback(
                         name, done_future
                     )
                 )
@@ -162,13 +162,13 @@ class IndexingMixin:
 
     def _index_done_callback(
         self,
-        binary_name: str,
+        program_name: str,
         future: concurrent.futures.Future,
     ) -> None:
         with self._index_lock:
-            self._index_futures.pop(binary_name, None)
+            self._index_futures.pop(program_name, None)
         try:
             future.result()
-            logger.info("Background indexing completed successfully for %s.", binary_name)
+            logger.info("Background indexing completed successfully for %s.", program_name)
         except Exception:
-            logger.error("Background indexing failed for %s.", binary_name, exc_info=True)
+            logger.error("Background indexing failed for %s.", program_name, exc_info=True)

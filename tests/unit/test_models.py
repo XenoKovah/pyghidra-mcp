@@ -1,24 +1,26 @@
 from pyghidra_mcp.models import (
-    BytesReadResult,
     CodeSearchResult,
-    CodeSearchResults,
     CrossReferenceInfo,
     CrossReferenceInfos,
     DecompiledFunction,
     ExportInfo,
     ExportInfos,
+    FunctionRef,
     ImportInfo,
     ImportInfos,
+    ListFunctionCallsResponse,
+    ListProgramsResponse,
     ProgramBasicInfo,
     ProgramBasicInfos,
     ProgramInfo,
-    ProgramInfos,
+    ReadBytesResponse,
+    SearchCodeResponse,
     SearchMode,
+    SearchStringsResponse,
+    SearchSymbolsResponse,
     StringInfo,
     StringSearchResult,
-    StringSearchResults,
     SymbolInfo,
-    SymbolSearchResults,
 )
 
 
@@ -76,8 +78,8 @@ def test_program_info_model():
 
 
 def test_program_infos_model():
-    """Test the ProgramInfos model."""
-    infos = ProgramInfos(
+    """Test the ListProgramsResponse model."""
+    infos = ListProgramsResponse(
         programs=[
             ProgramInfo(
                 name="test_program1",
@@ -202,8 +204,8 @@ def test_symbol_info_model():
 
 
 def test_symbol_search_results_model():
-    """Test the SymbolSearchResults model."""
-    results = SymbolSearchResults(
+    """Test the SearchSymbolsResponse model."""
+    results = SearchSymbolsResponse(
         symbols=[
             SymbolInfo(
                 name="test_symbol1",
@@ -245,8 +247,8 @@ def test_code_search_result_model():
 
 
 def test_code_search_results_model():
-    """Test the CodeSearchResults model."""
-    results = CodeSearchResults(
+    """Test the SearchCodeResponse model."""
+    results = SearchCodeResponse(
         results=[
             CodeSearchResult(
                 function_name="test_func1",
@@ -295,8 +297,8 @@ def test_string_search_result_model():
 
 
 def test_string_search_results_model():
-    """Test the StringSearchResults model."""
-    results = StringSearchResults(
+    """Test the SearchStringsResponse model."""
+    results = SearchStringsResponse(
         strings=[
             StringSearchResult(value="test_string1", address="0x1234", similarity=0.95),
             StringSearchResult(value="test_string2", address="0x5678", similarity=0.85),
@@ -308,8 +310,8 @@ def test_string_search_results_model():
 
 
 def test_bytes_read_result_model():
-    """Test the BytesReadResult model."""
-    result = BytesReadResult(
+    """Test the ReadBytesResponse model."""
+    result = ReadBytesResponse(
         address="0x1234",
         size=4,
         data="01020304",
@@ -338,15 +340,21 @@ def test_decompiled_function_with_rich_fields():
         to_address="0x2000",
         type="UNCONDITIONAL_CALL",
     )
+    callees = ListFunctionCallsResponse(
+        functions=[
+            FunctionRef(name="helper_a", address="0x1100"),
+            FunctionRef(name="helper_b", address="0x1200"),
+        ]
+    )
     func = DecompiledFunction(
         name="rich_func",
         code="void rich_func() { }",
         signature="void rich_func()",
-        callees=["helper_a", "helper_b"],
+        callees=callees,
         referenced_strings=["hello world", "error: %s"],
         xrefs=[xref],
     )
-    assert func.callees == ["helper_a", "helper_b"]
+    assert [f.name for f in func.callees.functions] == ["helper_a", "helper_b"]
     assert func.referenced_strings == ["hello world", "error: %s"]
     assert len(func.xrefs) == 1
     assert func.xrefs[0].function_name == "caller"

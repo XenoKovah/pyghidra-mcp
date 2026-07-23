@@ -122,7 +122,7 @@ def streamable_server(test_binary, test_dir, ghidra_env):
         while time.time() < deadline:
             try:
                 async with PyGhidraMcpClient(host="127.0.0.1", port=8000) as client:
-                    result = await client.list_project_binaries()
+                    result = await client.list_programs()
                     programs = result.get("programs", [])
                     if programs and all(
                         p.get("analysis_complete", False)
@@ -161,12 +161,12 @@ def client():
 
 
 @pytest.fixture
-def binary_name(client, streamable_server):
+def program_name(client, streamable_server):
     """Get the binary name from the server."""
 
-    async def _get_binary_name():
+    async def _get_program_name():
         async with client:
-            result = await client.list_project_binaries()
+            result = await client.list_programs()
             programs = result.get("programs", [])
             for prog in programs:
                 name = prog.get("name", "")
@@ -179,32 +179,32 @@ def binary_name(client, streamable_server):
                 f"No binaries found. Available: {[p.get('name', '') for p in programs]}"
             )
 
-    return asyncio.run(_get_binary_name())
+    return asyncio.run(_get_program_name())
 
 
 @pytest.mark.asyncio
 async def test_list_binaries(client, streamable_server):
     """Test listing binaries in the project."""
     async with client:
-        result = await client.list_project_binaries()
+        result = await client.list_programs()
         assert "programs" in result
         assert len(result["programs"]) >= 1
 
 
 @pytest.mark.asyncio
-async def test_decompile_function(client, binary_name, main_func_name):
+async def test_decompile_function(client, program_name, main_func_name):
     """Test decompiling a function."""
     async with client:
-        result = await client.decompile_function(binary_name, main_func_name)
+        result = await client.decompile_function(program_name, main_func_name)
         assert "code" in result
         assert main_func_name in result["code"]
 
 
 @pytest.mark.asyncio
-async def test_decompile_function_with_callees(client, binary_name, main_func_name):
+async def test_decompile_function_with_callees(client, program_name, main_func_name):
     """Test decompile_function with include_callees flag."""
     async with client:
-        result = await client.decompile_function(binary_name, main_func_name, include_callees=True)
+        result = await client.decompile_function(program_name, main_func_name, include_callees=True)
         assert "code" in result
         assert main_func_name in result["code"]
         assert "callees" in result
@@ -212,10 +212,10 @@ async def test_decompile_function_with_callees(client, binary_name, main_func_na
 
 
 @pytest.mark.asyncio
-async def test_search_symbols(client, binary_name, func_prefix):
+async def test_search_symbols(client, program_name, func_prefix):
     """Test searching for symbols."""
     async with client:
-        result = await client.search_symbols(binary_name, "function", offset=0, limit=10)
+        result = await client.search_symbols(program_name, "function", offset=0, limit=10)
         name_one = f"{func_prefix}function_one"
         name_two = f"{func_prefix}function_two"
         assert "symbols" in result
@@ -225,12 +225,12 @@ async def test_search_symbols(client, binary_name, func_prefix):
 
 
 @pytest.mark.asyncio
-async def test_search_code(client, binary_name, func_prefix):
+async def test_search_code(client, program_name, func_prefix):
     """Test searching code."""
     name_one = f"{func_prefix}function_one"
     async with client:
         result = await client.search_code(
-            binary_name,
+            program_name,
             query=name_one,
             limit=5,
             offset=0,
@@ -248,62 +248,62 @@ async def test_search_code(client, binary_name, func_prefix):
 
 
 @pytest.mark.asyncio
-async def test_search_strings(client, binary_name):
+async def test_search_strings(client, program_name):
     """Test searching strings."""
     async with client:
-        result = await client.search_strings(binary_name, "Hello", limit=10)
+        result = await client.search_strings(program_name, "Hello", limit=10)
         assert "strings" in result
         assert len(result["strings"]) > 0
         assert any("Hello" in s["value"] for s in result["strings"])
 
 
 @pytest.mark.asyncio
-async def test_list_imports(client, binary_name):
+async def test_list_imports(client, program_name):
     """Test listing imports."""
     async with client:
-        result = await client.list_imports(binary_name, query=".*printf.*", offset=0, limit=10)
+        result = await client.list_imports(program_name, query=".*printf.*", offset=0, limit=10)
         assert "imports" in result
         assert len(result["imports"]) > 0
         assert any("printf" in imp["name"] for imp in result["imports"])
 
 
 @pytest.mark.asyncio
-async def test_list_exports(client, binary_name, func_prefix):
+async def test_list_exports(client, program_name, func_prefix):
     """Test listing exports."""
     name_one = f"{func_prefix}function_one"
     async with client:
-        result = await client.list_exports(binary_name, query=".*function.*", offset=0, limit=10)
+        result = await client.list_exports(program_name, query=".*function.*", offset=0, limit=10)
         assert "exports" in result
         assert len(result["exports"]) > 0
         assert any(name_one in exp["name"] for exp in result["exports"])
 
 
 @pytest.mark.asyncio
-async def test_list_xrefs(client, binary_name, func_prefix):
+async def test_list_xrefs(client, program_name, func_prefix):
     """Test listing cross-references."""
     name_one = f"{func_prefix}function_one"
     async with client:
-        result = await client.list_xrefs(binary_name, name_one)
+        result = await client.list_xrefs(program_name, name_one)
         assert "cross_references" in result
         assert len(result["cross_references"]) > 0
 
 
 @pytest.mark.asyncio
-async def test_read_bytes(client, binary_name, base_address):
+async def test_read_bytes(client, program_name, base_address):
     """Test reading bytes from memory."""
     async with client:
-        result = await client.read_bytes(binary_name, address=base_address, size=32)
+        result = await client.read_bytes(program_name, address=base_address, size=32)
         assert "data" in result
         assert "address" in result
         assert result["size"] == 32
 
 
 @pytest.mark.asyncio
-async def test_gen_callgraph(client, binary_name, main_func_name):
+async def test_gen_callgraph(client, program_name, main_func_name):
     """Test generating a call graph."""
     async with client:
         result = await client.gen_callgraph(
-            binary_name,
+            program_name,
             function_name=main_func_name,
             direction="calling",
             display_type="flow",
@@ -318,9 +318,9 @@ async def test_gen_callgraph(client, binary_name, main_func_name):
 
 
 @pytest.mark.asyncio
-async def test_list_binary_metadata(client, binary_name):
+async def test_list_binary_metadata(client, program_name):
     """Test listing binary metadata."""
     async with client:
-        result = await client.list_project_binary_metadata(binary_name)
+        result = await client.get_program_metadata(program_name)
         assert isinstance(result, dict)
         assert len(result) > 0

@@ -52,7 +52,7 @@ def test_unique_short_name_match_rejects_ambiguous_programs():
         context._get_unique_short_name_match("sample")
 
 
-def test_list_project_binary_infos_includes_closed_domain_files():
+def test_list_program_infos_includes_closed_domain_files():
     context = GuiPyGhidraContext.__new__(GuiPyGhidraContext)
     context.programs = {}
     context._programs_lock = threading.RLock()
@@ -66,7 +66,7 @@ def test_list_project_binary_infos_includes_closed_domain_files():
     }
     context.list_binary_domain_files = Mock(return_value=[domain_file])
 
-    infos = context.list_project_binary_infos()
+    infos = context.list_program_infos()
 
     assert len(infos) == 1
     assert infos[0].name == "/folder/sample"

@@ -12,16 +12,20 @@ from ghidrecomp.callgraph import gen_callgraph
 from jpype import JByte
 
 from pyghidra_mcp.models import (
-    BytesReadResult,
     CallGraphDirection,
     CallGraphDisplayType,
-    CallGraphResult,
     CodeSearchResult,
-    CodeSearchResults,
     CrossReferenceInfo,
+    DataItemInfo,
+    DataTypeInfo,
     DecompiledFunction,
     ExportInfo,
+    FunctionInfo,
+    FunctionRef,
+    GenCallgraphResponse,
     ImportInfo,
+    ReadBytesResponse,
+    SearchCodeResponse,
     SearchMode,
     StringInfo,
     StringSearchResult,
@@ -49,6 +53,103 @@ def ghidra_transaction(program, description: str):
         committed = True
     finally:
         program.endTransaction(tx_id, committed)
+
+
+def _compute_struct_init_size(resolved: list[tuple[dict, typing.Any]]) -> int:
+    """Largest `offset + dt.getLength()` across fields that carry an offset.
+
+    Used to size a StructureDataType big enough to fit all explicitly-placed
+    fields; fields without an offset are ignored here (they'll be appended
+    later by `_layout_struct_fields`).
+    """
+    init_size = 0
+    for f, dt in resolved:
+        off = f.get("offset")
+        if off is not None:
+            end = off + dt.getLength()
+            if end > init_size:
+                init_size = end
+    return init_size
+
+
+def _layout_struct_fields(
+    struct, resolved: list[tuple[dict, typing.Any]], has_offsets: bool
+) -> None:
+    """Add each resolved field to a StructureDataType.
+
+    When any field specifies an offset (``has_offsets=True``), fields with an
+    offset are placed explicitly via replaceAtOffset; others are appended.
+    When no field has an offset, all fields are appended in order.
+    """
+    for f, dt in resolved:
+        off = f.get("offset")
+        if has_offsets and off is not None:
+            struct.replaceAtOffset(off, dt, dt.getLength(), f["name"], "")
+        else:
+            struct.add(dt, dt.getLength(), f["name"], "")
+
+
+def _resolve_data_type_by_name_or_path(dtm, name_or_path: str):
+    """Look up a Ghidra DataType by full DTM path, falling back to bare-name search.
+
+    Resolution order:
+      1. ``dtm.getDataType(name_or_path)`` — fast path lookup; works for
+         ``"/Point"`` and ``"/MyLib/Point"``.
+      2. If ``name_or_path`` doesn't start with ``/``, retry with one prepended
+         (handles bare names at root and ``"MyLib/Point"`` style paths).
+      3. Linear scan of every category for a name match (last-resort).
+
+    Returns ``None`` if nothing matches.
+    """
+    dt = dtm.getDataType(name_or_path)
+    if dt is not None:
+        return dt
+    if not name_or_path.startswith("/"):
+        dt = dtm.getDataType("/" + name_or_path)
+        if dt is not None:
+            return dt
+    for candidate in dtm.getAllDataTypes():
+        if str(candidate.getName()) == name_or_path:
+            return candidate
+    return None
+
+
+def _resolve_script_path(script: str):
+    """Locate a script file through the standard search chain.
+
+    Search order:
+      1. ``script`` as-given (absolute path or CWD-relative).
+      2. ``~/ghidra_scripts/<script>`` and ``~/ghidra_scripts/<basename>``.
+      3. ``./ghidra_scripts/<script>`` and ``./ghidra_scripts/<basename>``.
+      4. If ``script`` has no extension, each of the above is also tried with
+         ``.py`` appended (``.py`` first, then bare).
+
+    Returns the first existing file as a resolved ``Path``, or ``None``.
+    """
+    from pathlib import Path
+
+    home_scripts = Path.home() / "ghidra_scripts"
+    cwd_scripts = Path.cwd() / "ghidra_scripts"
+    basename = Path(script).name
+
+    bases = [
+        Path(script),
+        home_scripts / script,
+        home_scripts / basename,
+        cwd_scripts / script,
+        cwd_scripts / basename,
+    ]
+
+    has_extension = "." in basename
+    suffixes: list[str] = [""] if has_extension else [".py", ""]
+
+    for base in bases:
+        for suffix in suffixes:
+            candidate = Path(str(base) + suffix) if suffix else base
+            if candidate.is_file():
+                return candidate.resolve()
+
+    return None
 
 
 def handle_exceptions(func):
@@ -287,7 +388,18 @@ class GhidraTools:
 
     def decompile_function(self, func: "Function", timeout: int = 0) -> DecompiledFunction:
         """Decompiles a function in a specified binary and returns its pseudo-C code."""
+        import os
+
         from ghidra.util.task import ConsoleTaskMonitor
+
+        # Per-function decompile bound (seconds). When no explicit timeout is given
+        # (timeout <= 0), fall back to PYGHIDRA_MCP_DECOMP_TIMEOUT (default 120);
+        # set it to 0 for stock/infinite behavior. This keeps a pathological /
+        # CFG-corrupt function — e.g. an ARC image whose decompiler chases
+        # references into unmapped memory and never returns — from wedging the
+        # decompiler pool forever (background indexing calls this with no timeout).
+        if timeout <= 0:
+            timeout = int(os.environ.get("PYGHIDRA_MCP_DECOMP_TIMEOUT", "120") or "120")
 
         monitor = ConsoleTaskMonitor()
         with self.decompiler_pool.acquire() as decompiler:
@@ -396,32 +508,131 @@ class GhidraTools:
             external=symbol.isExternal(),
         )
 
-    @handle_exceptions
-    def search_symbols_by_name(
-        self, query: str, functions_only: bool = False, offset: int = 0, limit: int = 100
-    ) -> list[SymbolInfo]:
-        """Searches for symbols within a binary by name (supports regex).
+    def _fetch_symbols_for_kinds(self, kind_set, query, is_regex):
+        """Return the initial iterable of symbols based on the kind filter.
 
-        When functions_only=True, searches only function symbols (no labels/variables).
+        Single-kind ``{"functions"}`` takes the FunctionManager fast path;
+        everything else scans the symbol table.
         """
+        if kind_set == {"functions"}:
+            sources = self.get_all_functions(True) if is_regex else self.find_functions(query)
+            return [func.getSymbol() for func in sources]
+        return self.get_all_symbols(True) if is_regex else self.find_symbols(query)
 
+    @staticmethod
+    def _symbol_matches_kind_set(sym, kind_set, global_ns) -> bool:
+        """Return True when sym satisfies any of the SymbolKind values in kind_set."""
+        from ghidra.program.model.symbol import SymbolType
+
+        st = sym.getSymbolType()
+        if "functions" in kind_set and st == SymbolType.FUNCTION:
+            return True
+        if "labels" in kind_set and st == SymbolType.LABEL:
+            return True
+        if "globals" in kind_set and st != SymbolType.FUNCTION:
+            if sym.getParentNamespace() == global_ns:
+                return True
+        return False
+
+    @handle_exceptions
+    def search_symbols(
+        self,
+        query: str = ".*",
+        kinds: list | None = None,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> list[SymbolInfo]:
+        """Search symbols within a binary by name (regex supported).
+
+        ``kinds`` is an optional list of SymbolKind values (or their string
+        equivalents). ``None`` or omitted means include every symbol.
+        Supported values: ``"functions"``, ``"globals"``, ``"labels"``.
+        """
         if not query:
-            raise ValueError("Query string is required")
+            query = ".*"
+
+        kind_set = None
+        if kinds:
+            kind_set = {k.value if hasattr(k, "value") else str(k) for k in kinds}
 
         rm = self.program.getReferenceManager()
         is_regex = bool(_REGEX_META.search(query))
+        symbols: typing.Iterable = self._fetch_symbols_for_kinds(kind_set, query, is_regex)
 
-        if functions_only:
-            sources = self.get_all_functions(True) if is_regex else self.find_functions(query)
-            symbols = (func.getSymbol() for func in sources)
-        else:
-            symbols = self.get_all_symbols(True) if is_regex else self.find_symbols(query)
+        # Only need per-symbol kind classification when the filter spans more
+        # than the fast path already pre-filtered for us.
+        if kind_set is not None and kind_set != {"functions"}:
+            global_ns = self.program.getGlobalNamespace()
+            symbols = [s for s in symbols if self._symbol_matches_kind_set(s, kind_set, global_ns)]
 
         results = [
             self._symbol_to_info(sym, rm)
             for sym in symbols
             if self._symbol_matches_query(query, sym)
         ]
+        return results[offset : limit + offset]
+
+    @staticmethod
+    def _function_to_info(func) -> FunctionInfo:
+        """Project a Ghidra Function into the FunctionInfo response model."""
+        from ghidra.program.model.symbol import SourceType
+
+        symbol = func.getSymbol()
+        return FunctionInfo(
+            name=str(func.getName()),
+            address=str(func.getEntryPoint()),
+            refcount=int(symbol.getReferenceCount()),
+            is_thunk=bool(func.isThunk()),
+            is_external=bool(func.isExternal()),
+            is_user_defined=symbol.getSource() != SourceType.DEFAULT,
+        )
+
+    @handle_exceptions
+    def search_functions(
+        self,
+        query: str = ".*",
+        min_refcount: int | None = None,
+        max_refcount: int | None = None,
+        user_defined_only: bool = False,
+        include_thunks: bool = True,
+        include_externals: bool = True,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> list[FunctionInfo]:
+        """Search functions with optional filters.
+
+        ``query`` is a case-insensitive regex matched against the function
+        name (defaults to ``".*"`` so the call lists every function unless
+        narrowed). ``min_refcount`` / ``max_refcount`` bound xref counts
+        (inclusive). ``user_defined_only`` excludes Ghidra-autogenerated
+        names like ``FUN_*``. ``include_thunks`` and ``include_externals``
+        gate those function categories. Results are returned in address
+        order.
+        """
+        if not query:
+            query = ".*"
+
+        fm = self.program.getFunctionManager()
+        results: list[FunctionInfo] = []
+        for func in fm.getFunctions(True):
+            if not include_thunks and func.isThunk():
+                continue
+            if not include_externals and func.isExternal():
+                continue
+
+            info = self._function_to_info(func)
+
+            if user_defined_only and not info.is_user_defined:
+                continue
+            if min_refcount is not None and info.refcount < min_refcount:
+                continue
+            if max_refcount is not None and info.refcount > max_refcount:
+                continue
+            if not self._matches_query(query, info.name):
+                continue
+
+            results.append(info)
+
         return results[offset : limit + offset]
 
     @handle_exceptions
@@ -481,14 +692,90 @@ class GhidraTools:
         return cross_references
 
     @handle_exceptions
-    def get_callees(self, name_or_address: str) -> list[str]:
-        """Get names of functions called by the given function."""
+    def disassemble_function(self, name_or_address: str) -> dict:
+        """Return the assembly listing of the named or addressed function.
+
+        Produces a flat text listing (`"addr: mnemonic operands ; comment"`
+        per instruction) plus name/entry/signature/instruction_count.
+        """
+        func = self.find_function(name_or_address)
+        listing = self.program.getListing()
+        entry = func.getEntryPoint()
+        end = func.getBody().getMaxAddress()
+
+        try:
+            from ghidra.program.model.listing import CommentType
+
+            eol_comment = CommentType.EOL
+        except ImportError:
+            from ghidra.program.model.listing import CodeUnit
+
+            eol_comment = CodeUnit.EOL_COMMENT
+
+        lines: list[str] = []
+        instruction_count = 0
+        for instr in listing.getInstructions(entry, True):
+            if instr.getAddress().compareTo(end) > 0:
+                break
+
+            addr_str = str(instr.getAddress())
+            instr_text = str(instr)
+            try:
+                comment = listing.getComment(eol_comment, instr.getAddress())
+            except Exception:
+                comment = None
+
+            if comment:
+                lines.append(f"{addr_str}: {instr_text} ; {comment}")
+            else:
+                lines.append(f"{addr_str}: {instr_text}")
+            instruction_count += 1
+
+        signature = func.getSignature()
+        return {
+            "name": str(func.getName()),
+            "entry": str(entry),
+            "signature": str(signature) if signature is not None else None,
+            "listing": "\n".join(lines),
+            "instruction_count": instruction_count,
+        }
+
+    def _get_related_functions(self, name_or_address: str, direction: str) -> list[FunctionRef]:
+        """Return called-from or calling-into functions, sorted by address.
+
+        ``direction`` is ``"callees"`` (functions called by this one) or
+        ``"callers"`` (functions that call this one).
+        """
         from ghidra.util.task import ConsoleTaskMonitor
 
         func = self.find_function(name_or_address)
         monitor = ConsoleTaskMonitor()
-        called = func.getCalledFunctions(monitor)
-        return [f.getName() for f in called]
+        if direction == "callees":
+            related = func.getCalledFunctions(monitor)
+        elif direction == "callers":
+            related = func.getCallingFunctions(monitor)
+        else:
+            raise ValueError(f"Unknown direction {direction!r}")
+
+        refs = [FunctionRef(name=str(f.getName()), address=str(f.getEntryPoint())) for f in related]
+        refs.sort(key=lambda r: r.address)
+        return refs
+
+    @handle_exceptions
+    def list_callees(
+        self, name_or_address: str, offset: int = 0, limit: int = 100
+    ) -> list[FunctionRef]:
+        """List functions called by the given function, sorted by address."""
+        refs = self._get_related_functions(name_or_address, "callees")
+        return refs[offset : offset + limit]
+
+    @handle_exceptions
+    def list_callers(
+        self, name_or_address: str, offset: int = 0, limit: int = 100
+    ) -> list[FunctionRef]:
+        """List functions that call the given function, sorted by address."""
+        refs = self._get_related_functions(name_or_address, "callers")
+        return refs[offset : offset + limit]
 
     @handle_exceptions
     def get_referenced_strings(self, name_or_address: str) -> list[str]:
@@ -647,7 +934,7 @@ class GhidraTools:
         include_full_code: bool = True,
         preview_length: int = 500,
         similarity_threshold: float = 0.0,
-    ) -> CodeSearchResults:
+    ) -> SearchCodeResponse:
         """
         Searches the code in the binary for a given query.
 
@@ -698,7 +985,7 @@ class GhidraTools:
             if estimated_total is not None:
                 semantic_total = estimated_total
 
-        return CodeSearchResults(
+        return SearchCodeResponse(
             results=search_results,
             query=query,
             search_mode=search_mode,
@@ -727,7 +1014,7 @@ class GhidraTools:
         ][:limit]
 
     @handle_exceptions
-    def read_bytes(self, address: str, size: int = 32) -> BytesReadResult:
+    def read_bytes(self, address: str, size: int = 32) -> ReadBytesResponse:
         """Reads raw bytes from memory at a specified address."""
         # Maximum size limit to prevent excessive memory reads
         max_read_size = 8192
@@ -769,7 +1056,7 @@ class GhidraTools:
         else:
             data = b""
 
-        return BytesReadResult(
+        return ReadBytesResponse(
             address=str(addr),
             size=len(data),
             data=data.hex(),
@@ -787,7 +1074,7 @@ class GhidraTools:
         condense_threshold: int = 50,
         top_layers: int = 5,
         bottom_layers: int = 5,
-    ) -> CallGraphResult:
+    ) -> GenCallgraphResponse:
         """Generates a call graph for a specified function."""
 
         cg_func = self.find_function(function_name_or_address)
@@ -823,7 +1110,7 @@ class GhidraTools:
                 mermaid_url = graph_content.split("\n")[0]
                 break
 
-        return CallGraphResult(
+        return GenCallgraphResponse(
             function_name=name,
             direction=CallGraphDirection(direction),
             display_type=cg_display_type,
@@ -850,6 +1137,245 @@ class GhidraTools:
             "address": address,
             "old_name": old_name,
             "new_name": new_name,
+        }
+
+    @handle_exceptions
+    def save_program(self) -> dict:
+        from ghidra.util.task import ConsoleTaskMonitor
+
+        program = self.program
+        # Ghidra/pyghidra leaves a stray sub-transaction with an empty
+        # description open during program load. ``save`` rejects the lock as
+        # long as any sub-transaction is open ("Unable to lock due to active
+        # transaction"), so close every still-open entry first by reaching
+        # into ``DomainObjectDBTransaction`` via reflection.
+        if not bool(program.canLock()):
+            tx_info = program.getCurrentTransactionInfo()
+            if tx_info is not None:
+                self._force_end_open_subtransactions(program, tx_info)
+
+        program.save("pyghidra-mcp: save_program", ConsoleTaskMonitor())
+        return {"saved": True}
+
+    @staticmethod
+    def _force_end_open_subtransactions(program, tx_info) -> None:
+        """End every still-open ``TransactionEntry`` of ``tx_info``.
+
+        ``DomainObjectDBTransaction`` assigns each entry an id of
+        ``baseId + list_index``; passing that to ``program.endTransaction``
+        closes the entry. Entries with status != NOT_DONE are already closed
+        and are skipped to avoid IllegalStateException.
+        """
+        cls = tx_info.getClass()
+        try:
+            list_field = cls.getDeclaredField("list")
+            base_field = cls.getDeclaredField("baseId")
+        except Exception as e:
+            logger.debug("save_program: cannot access transaction internals: %s", e)
+            return
+        list_field.setAccessible(True)
+        base_field.setAccessible(True)
+        entries = list_field.get(tx_info)
+        base_id = int(base_field.get(tx_info))
+        if entries is None:
+            return
+        for index in range(entries.size()):
+            entry = entries.get(index)
+            try:
+                ec = entry.getClass()
+                status_f = ec.getDeclaredField("status")
+                status_f.setAccessible(True)
+                status = status_f.get(entry)
+                if str(status) != "NOT_DONE":
+                    continue
+                desc_f = ec.getDeclaredField("description")
+                desc_f.setAccessible(True)
+                desc_str = desc_f.get(entry)
+                entry_id = base_id + index
+                program.endTransaction(entry_id, True)
+                logger.debug(
+                    "save_program: closed leftover sub-transaction id=%s desc=%r",
+                    entry_id, desc_str,
+                )
+            except Exception as e:
+                logger.debug("save_program: failed to close entry %d: %s", index, e)
+
+    @handle_exceptions
+    def create_function(
+        self,
+        address: str,
+        name: str | None = None,
+        disassemble_first: bool = True,
+    ) -> dict:
+        """Create a function at ``address``.
+
+        When ``disassemble_first`` is True (default) and there are no
+        instructions at the target, runs Ghidra's disassembler first so
+        ``CreateFunctionCmd`` has something to work with. Optionally renames
+        the new function to ``name``. Errors if a function already exists at
+        the address.
+        """
+        from ghidra.app.cmd.disassemble import DisassembleCommand
+        from ghidra.app.cmd.function import CreateFunctionCmd
+        from ghidra.program.model.address import AddressSet
+        from ghidra.program.model.symbol import SourceType
+        from ghidra.util.task import TaskMonitor
+
+        addr = self._parse_address(address)
+        fm = self.program.getFunctionManager()
+        if fm.getFunctionAt(addr) is not None:
+            existing = fm.getFunctionAt(addr)
+            raise ValueError(f"Function already exists at {address}: {existing.getName()}")
+
+        listing = self.program.getListing()
+        with ghidra_transaction(self.program, f"pyghidra-mcp: create_function @ {addr}"):
+            if disassemble_first and listing.getInstructionAt(addr) is None:
+                addr_set = AddressSet(addr, addr)
+                disasm_cmd = DisassembleCommand(addr_set, None, True)
+                if not disasm_cmd.applyTo(self.program, TaskMonitor.DUMMY):
+                    raise ValueError(
+                        f"Failed to disassemble at {address}: {disasm_cmd.getStatusMsg()}"
+                    )
+
+            create_cmd = CreateFunctionCmd(addr)
+            if not create_cmd.applyTo(self.program, TaskMonitor.DUMMY):
+                raise ValueError(
+                    f"Failed to create function at {address}: {create_cmd.getStatusMsg()}"
+                )
+
+            func = fm.getFunctionAt(addr)
+            if func is None:
+                raise ValueError(
+                    f"Function creation reported success but function not found at {address}"
+                )
+
+            if name:
+                func.setName(name, SourceType.USER_DEFINED)
+
+        self.invalidate_decompiler_cache()
+        return {
+            "name": str(func.getName()),
+            "entry_point": str(func.getEntryPoint()),
+            "body_size": int(func.getBody().getNumAddresses()),
+        }
+
+    @handle_exceptions
+    def delete_function(self, name_or_address: str) -> dict:
+        """Delete the function identified by ``name_or_address``.
+
+        Accepts a name or entry-point address (same lookup as
+        ``rename_function``). Returns the deleted function's name and entry
+        point for confirmation. Errors if no function matches.
+        """
+        func = self.find_function(name_or_address)
+        name = str(func.getName())
+        entry_point = str(func.getEntryPoint())
+
+        with ghidra_transaction(
+            self.program, f"pyghidra-mcp: delete_function {name} @ {entry_point}"
+        ):
+            removed = self.program.getFunctionManager().removeFunction(func.getEntryPoint())
+            if not removed:
+                raise ValueError(f"Failed to remove function {name} @ {entry_point}")
+
+        self.invalidate_decompiler_cache()
+        return {
+            "name": name,
+            "entry_point": entry_point,
+        }
+
+    def _resolve_calling_convention(self, calling_convention: str) -> str:
+        """Match ``calling_convention`` to one of the program's compiler-spec
+        names (with or without leading ``__``). Raises ``ValueError`` if the
+        name is unknown, listing the available conventions for diagnostics.
+        """
+        target = calling_convention.lower()
+        target_stripped = target.replace("__", "")
+        available = self.program.getCompilerSpec().getCallingConventions()
+        for model in available:
+            model_name = str(model.getName()).lower()
+            if (
+                model_name == target
+                or model_name == "__" + target
+                or model_name.replace("__", "") == target_stripped
+            ):
+                return str(model.getName())
+        names = ", ".join(str(m.getName()) for m in available)
+        raise ValueError(f"Unknown calling convention '{calling_convention}'. Available: {names}")
+
+    @handle_exceptions
+    def set_function_prototype(
+        self,
+        name_or_address: str,
+        prototype: str,
+        calling_convention: str | None = None,
+    ) -> dict:
+        """Apply a full C-style prototype to a function.
+
+        Parses ``prototype`` with Ghidra's ``FunctionSignatureParser`` and
+        applies it via ``ApplyFunctionSignatureCmd``. Optionally sets
+        ``calling_convention`` (e.g. ``"__cdecl"``, ``"__stdcall"``) — the
+        target name must match one of the program's compiler-spec
+        conventions, with or without the leading underscores.
+
+        Preserves the function's existing plate comment across the change
+        (``ApplyFunctionSignatureCmd`` would otherwise wipe it).
+
+        Raises ``ValueError`` (-> INVALID_PARAMS) on parse failure, on an
+        unknown calling convention, or if the command itself rejects the
+        signature.
+        """
+        from ghidra.app.cmd.function import ApplyFunctionSignatureCmd
+        from ghidra.app.util.parser import FunctionSignatureParser
+        from ghidra.program.model.symbol import SourceType
+        from ghidra.util.task import ConsoleTaskMonitor
+
+        if not prototype or not prototype.strip():
+            raise ValueError("prototype must be a non-empty string")
+
+        func = self.find_function(name_or_address)
+        entry_point = str(func.getEntryPoint())
+        addr = func.getEntryPoint()
+
+        dtm = self.program.getDataTypeManager()
+        parser = FunctionSignatureParser(dtm, None)
+        try:
+            sig = parser.parse(None, prototype)
+        except Exception as e:
+            raise ValueError(f"Failed to parse prototype {prototype!r}: {e}") from e
+        if sig is None:
+            raise ValueError(f"Failed to parse prototype {prototype!r}")
+
+        # Resolve calling convention (if any) before opening the transaction so
+        # we surface a clean INVALID_PARAMS without a half-applied state.
+        resolved_cc_name = (
+            self._resolve_calling_convention(calling_convention) if calling_convention else None
+        )
+
+        saved_plate_comment = func.getComment()
+
+        with ghidra_transaction(
+            self.program,
+            f"pyghidra-mcp: set prototype {func.getName()} @ {entry_point}",
+        ):
+            cmd = ApplyFunctionSignatureCmd(addr, sig, SourceType.USER_DEFINED)
+            if not cmd.applyTo(self.program, ConsoleTaskMonitor()):
+                raise ValueError(f"ApplyFunctionSignatureCmd failed: {cmd.getStatusMsg()}")
+
+            if resolved_cc_name is not None:
+                func.setCallingConvention(resolved_cc_name)
+
+            # ApplyFunctionSignatureCmd can clobber the plate comment; restore it.
+            if saved_plate_comment:
+                current = func.getComment()
+                if not current or current.startswith("Setting prototype:"):
+                    func.setComment(saved_plate_comment)
+
+        self.invalidate_decompiler_cache()
+        return {
+            "name": str(func.getName()),
+            "entry_point": entry_point,
+            "signature": str(func.getSignature()),
         }
 
     @handle_exceptions
@@ -975,6 +1501,906 @@ class GhidraTools:
             "comment_type": normalized_type,
         }
 
+    def run_inline_script(self, code: str, args: list[str] | None = None) -> dict:
+        """Execute inline Python code against the program.
+
+        The code runs inside a Ghidra transaction that commits on normal
+        completion and rolls back on exception. Available names in the script
+        namespace: `program` (alias `currentProgram`), `monitor`, and `args`.
+        Assign to `result` to return a value (its repr is captured).
+        """
+        import contextlib
+        import io
+
+        from ghidra.util.task import TaskMonitor
+
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+        namespace: dict = {
+            "program": self.program,
+            "currentProgram": self.program,
+            "monitor": TaskMonitor.DUMMY,
+            "args": list(args or []),
+        }
+
+        error: str | None = None
+        tx_id = self.program.startTransaction("pyghidra-mcp: run_inline_script")
+        committed = False
+        try:
+            with (
+                contextlib.redirect_stdout(stdout_buf),
+                contextlib.redirect_stderr(stderr_buf),
+            ):
+                try:
+                    exec(code, namespace)
+                    committed = True
+                except Exception as exc:
+                    error = f"{type(exc).__name__}: {exc}"
+        finally:
+            self.program.endTransaction(tx_id, committed)
+
+        if committed:
+            self.invalidate_decompiler_cache()
+
+        has_result = "result" in namespace
+        return {
+            "stdout": stdout_buf.getvalue(),
+            "stderr": stderr_buf.getvalue(),
+            "result_repr": repr(namespace["result"]) if has_result else None,
+            "committed": committed,
+            "error": error,
+        }
+
+    def run_script(self, script: str, args: list[str] | None = None) -> dict:
+        """Load a Python script from disk and execute it against the program.
+
+        See `_resolve_script_path` for the search chain. Once located, the
+        file's contents are executed through the same path as
+        `run_inline_script` — inside a Ghidra transaction with `program`,
+        `currentProgram`, `monitor`, and `args` in the namespace.
+        """
+        resolved = _resolve_script_path(script)
+        if resolved is None:
+            raise ValueError(f"Script not found: {script}")
+
+        code = resolved.read_text()
+        result = self.run_inline_script(code, args=args)
+        result["script"] = script
+        result["resolved_path"] = str(resolved)
+        return result
+
+    @handle_exceptions
+    def create_struct_type(self, name: str, fields: list) -> dict:
+        """Create a new structure data type.
+
+        `fields` is a list of StructField (or dicts with name/type/offset). If
+        any field has an explicit offset, all fields are placed explicitly
+        (initial size is computed to fit); otherwise fields are appended in
+        order.
+        """
+        from ghidra.program.model.data import StructureDataType
+
+        if not name:
+            raise ValueError("name is required")
+        if not fields:
+            raise ValueError("at least one field is required")
+
+        dtm = self.program.getDataTypeManager()
+        if dtm.getDataType(f"/{name}") is not None:
+            raise ValueError(f"Data type '{name}' already exists")
+
+        # Normalize + resolve field types up front so we fail before touching
+        # the program if anything is bad.
+        resolved = self._resolve_composite_fields(fields)
+        has_offsets = any(f.get("offset") is not None for f, _ in resolved)
+        init_size = _compute_struct_init_size(resolved) if has_offsets else 0
+
+        with ghidra_transaction(self.program, f"pyghidra-mcp: create_struct_type {name}"):
+            struct = StructureDataType(name, init_size)
+            _layout_struct_fields(struct, resolved, has_offsets)
+            created = dtm.addDataType(struct, None)
+
+        self.invalidate_decompiler_cache()
+        return {
+            "name": str(created.getName()),
+            "size": int(created.getLength()),
+        }
+
+    def _resolve_composite_fields(self, fields: list) -> list[tuple[dict, typing.Any]]:
+        """Normalize field dicts and resolve each declared type via Ghidra.
+
+        Shared by create_struct_type / create_union_type. Raises ValueError
+        if a field is missing name/type or references an unknown type.
+        """
+        resolved: list[tuple[dict, typing.Any]] = []
+        for f in fields:
+            field = f.model_dump() if hasattr(f, "model_dump") else dict(f)
+            fname = field.get("name")
+            ftype = field.get("type")
+            if not fname or not ftype:
+                raise ValueError(f"field is missing name/type: {field}")
+            dt = self._parse_data_type(ftype)
+            if dt is None:
+                raise ValueError(f"Unknown field type: {ftype}")
+            resolved.append((field, dt))
+        return resolved
+
+    @handle_exceptions
+    def create_enum_type(self, name: str, values: dict, size: int = 4) -> dict:
+        """Create a new enumeration data type.
+
+        `values` is a {member_name: int_value} mapping. `size` must be 1, 2,
+        4, or 8 bytes.
+        """
+        from ghidra.program.model.data import EnumDataType
+
+        if not name:
+            raise ValueError("name is required")
+        if size not in (1, 2, 4, 8):
+            raise ValueError(f"Invalid size {size}; must be 1, 2, 4, or 8")
+        if not values:
+            raise ValueError("at least one enum value is required")
+
+        dtm = self.program.getDataTypeManager()
+        if dtm.getDataType(f"/{name}") is not None:
+            raise ValueError(f"Data type '{name}' already exists")
+
+        with ghidra_transaction(self.program, f"pyghidra-mcp: create_enum_type {name}"):
+            enum_dt = EnumDataType(name, size)
+            for member_name, member_value in values.items():
+                enum_dt.add(str(member_name), int(member_value))
+            created = dtm.addDataType(enum_dt, None)
+
+        self.invalidate_decompiler_cache()
+        return {
+            "name": str(created.getName()),
+            "size": int(created.getLength()),
+        }
+
+    @handle_exceptions
+    def create_union_type(self, name: str, fields: list) -> dict:
+        """Create a new union data type.
+
+        `fields` is a list of StructField (or dicts with name/type). The
+        `offset` attribute on each field is ignored for unions.
+        """
+        from ghidra.program.model.data import UnionDataType
+
+        if not name:
+            raise ValueError("name is required")
+        if not fields:
+            raise ValueError("at least one field is required")
+
+        dtm = self.program.getDataTypeManager()
+        if dtm.getDataType(f"/{name}") is not None:
+            raise ValueError(f"Data type '{name}' already exists")
+
+        # Resolve upfront so we fail fast. Unions ignore the `offset` attr.
+        resolved = self._resolve_composite_fields(fields)
+
+        with ghidra_transaction(self.program, f"pyghidra-mcp: create_union_type {name}"):
+            union = UnionDataType(name)
+            for field, dt in resolved:
+                union.add(dt, field["name"], None)
+            created = dtm.addDataType(union, None)
+
+        self.invalidate_decompiler_cache()
+        return {
+            "name": str(created.getName()),
+            "size": int(created.getLength()),
+        }
+
+    @handle_exceptions
+    def create_array_type(self, name: str, base_type: str, length: int) -> dict:
+        """Create a named array data type (e.g. ``int[10]`` aliased to ``name``).
+
+        `length` is the element count (must be > 0). Errors if a type with
+        the given name already exists.
+        """
+        from ghidra.program.model.data import ArrayDataType
+
+        if not name:
+            raise ValueError("name is required")
+        if not base_type:
+            raise ValueError("base_type is required")
+        if length <= 0:
+            raise ValueError(f"length must be positive (got {length})")
+
+        dtm = self.program.getDataTypeManager()
+        if dtm.getDataType(f"/{name}") is not None:
+            raise ValueError(f"Data type '{name}' already exists")
+
+        base_dt = self._parse_data_type(base_type)
+        if base_dt is None:
+            raise ValueError(f"Unknown base type: {base_type}")
+
+        with ghidra_transaction(self.program, f"pyghidra-mcp: create_array_type {name}"):
+            array = ArrayDataType(base_dt, length, base_dt.getLength())
+            array.setName(name)
+            created = dtm.addDataType(array, None)
+
+        self.invalidate_decompiler_cache()
+        return {
+            "name": str(created.getName()),
+            "size": int(created.getLength()),
+        }
+
+    @handle_exceptions
+    def create_pointer_type(self, name: str, base_type: str) -> dict:
+        """Create a named pointer data type (``base_type *`` aliased to ``name``).
+
+        Special-cases ``base_type == "void"`` to use Ghidra's built-in
+        ``VoidDataType``. Errors if a type with the given name already exists.
+        """
+        from ghidra.program.model.data import PointerDataType, VoidDataType
+
+        if not name:
+            raise ValueError("name is required")
+        if not base_type:
+            raise ValueError("base_type is required")
+
+        dtm = self.program.getDataTypeManager()
+        if dtm.getDataType(f"/{name}") is not None:
+            raise ValueError(f"Data type '{name}' already exists")
+
+        if base_type == "void":
+            base_dt = VoidDataType.dataType
+        else:
+            base_dt = self._parse_data_type(base_type)
+        if base_dt is None:
+            raise ValueError(f"Unknown base type: {base_type}")
+
+        with ghidra_transaction(self.program, f"pyghidra-mcp: create_pointer_type {name}"):
+            pointer = PointerDataType(base_dt)
+            pointer.setName(name)
+            created = dtm.addDataType(pointer, None)
+
+        self.invalidate_decompiler_cache()
+        return {
+            "name": str(created.getName()),
+            "size": int(created.getLength()),
+        }
+
+    @handle_exceptions
+    def create_typedef(self, name: str, base_type: str) -> dict:
+        """Create a typedef alias for an existing data type.
+
+        `base_type` is passed to Ghidra's DataTypeParser, so pointer/array
+        syntax (``Foo *``, ``int[10]``) is supported natively. Errors if a
+        type with the given name already exists.
+        """
+        from ghidra.program.model.data import TypedefDataType
+
+        if not name:
+            raise ValueError("name is required")
+        if not base_type:
+            raise ValueError("base_type is required")
+
+        dtm = self.program.getDataTypeManager()
+        if dtm.getDataType(f"/{name}") is not None:
+            raise ValueError(f"Data type '{name}' already exists")
+
+        base_dt = self._parse_data_type(base_type)
+        if base_dt is None:
+            raise ValueError(f"Unknown base type: {base_type}")
+
+        with ghidra_transaction(self.program, f"pyghidra-mcp: create_typedef {name}"):
+            typedef = TypedefDataType(name, base_dt)
+            created = dtm.addDataType(typedef, None)
+
+        self.invalidate_decompiler_cache()
+        return {
+            "name": str(created.getName()),
+            "size": int(created.getLength()),
+        }
+
+    @handle_exceptions
+    def apply_data_type(
+        self,
+        address: str,
+        type_name: str,
+        clear_existing: bool = True,
+    ) -> dict:
+        """Apply a data type at the given memory address.
+
+        When ``clear_existing`` is True (default), any code/data units in the
+        target range are cleared before creating the new data. When False,
+        ``createData`` may raise if the range is occupied.
+        """
+        if not address:
+            raise ValueError("address is required")
+        if not type_name:
+            raise ValueError("type_name is required")
+
+        dt = self._parse_data_type(type_name)
+        if dt is None:
+            raise ValueError(f"Unknown data type: {type_name}")
+
+        addr = self._parse_address(address)
+        if not self.program.getMemory().contains(addr):
+            raise ValueError(f"Address is not in program memory: {address}")
+
+        listing = self.program.getListing()
+        expected_size = int(dt.getLength())
+
+        with ghidra_transaction(
+            self.program,
+            f"pyghidra-mcp: apply_data_type {type_name} @ {addr}",
+        ):
+            if clear_existing and expected_size > 0:
+                end_addr = addr.add(expected_size - 1)
+                listing.clearCodeUnits(addr, end_addr, False)
+            data = listing.createData(addr, dt)
+
+        self.invalidate_decompiler_cache()
+        applied_size = int(data.getLength()) if data is not None else 0
+        return {
+            "address": str(addr),
+            "applied_size": applied_size,
+        }
+
+    @handle_exceptions
+    def delete_data_type(self, name_or_path: str) -> dict:
+        """Delete a data type from the program's data type manager.
+
+        Resolves ``name_or_path`` via the standard
+        ``_resolve_data_type_by_name_or_path`` lookup (full DTM path or bare
+        name). Captures name/path/kind before deletion so the response can
+        confirm exactly what was removed. Errors with INVALID_PARAMS if the
+        type doesn't exist or if Ghidra refuses to remove it (typically
+        because it's referenced elsewhere).
+        """
+        if not name_or_path:
+            raise ValueError("name_or_path is required")
+
+        dtm = self.program.getDataTypeManager()
+        dt = _resolve_data_type_by_name_or_path(dtm, name_or_path)
+        if dt is None:
+            raise ValueError(f"Data type not found: {name_or_path}")
+
+        # Capture identity before deletion — these calls are unsafe afterwards.
+        name = str(dt.getName())
+        path = str(dt.getPathName())
+        kind = self._classify_data_type(dt)
+
+        with ghidra_transaction(self.program, f"pyghidra-mcp: delete_data_type {path}"):
+            removed = dtm.remove(dt, None)
+            if not removed:
+                raise ValueError(
+                    f"Failed to delete data type '{path}'. "
+                    "It may still be referenced; clear references first."
+                )
+
+        self.invalidate_decompiler_cache()
+        return {
+            "name": name,
+            "path": path,
+            "kind": kind,
+        }
+
+    def _build_imported_data_type_info(self, dt) -> dict:
+        """Render a DataType as an ``DataTypeInfo``-shaped dict for response use."""
+        length = int(dt.getLength())
+        return {
+            "name": str(dt.getName()),
+            "kind": self._classify_data_type(dt),
+            "size": length if length > 0 else None,
+            "path": str(dt.getPathName()),
+        }
+
+    def _move_to_category(self, dt, target_category, handler) -> str:
+        """Move ``dt`` into ``target_category`` and return the new pathname.
+
+        Returns the original pathname on failure so the caller can still log
+        a sensible response (the type itself remains in the DTM either way).
+        """
+        try:
+            target_category.moveDataType(dt, handler)
+        except Exception:
+            logger.debug(
+                "Failed to move %s to %s", dt.getPathName(), target_category, exc_info=True
+            )
+        return str(dt.getPathName())
+
+    @handle_exceptions
+    def import_c_types(
+        self,
+        source: str,
+        category_path: str | None = None,
+        replace: bool = False,
+    ) -> dict:
+        """Parse a C-declarations string and add the resulting types to the DTM.
+
+        Uses Ghidra's ``CParser``. ``source`` is a free-form string of C
+        declarations: ``struct``, ``union``, ``enum``, ``typedef``, function
+        prototypes. ``#include`` directives are NOT resolved — paste flat
+        declarations.
+
+        ``category_path`` (e.g. ``"/MyLib"``) places newly-added types in
+        the given DTM category, creating it if needed; ``None`` keeps them
+        at the root.
+
+        ``replace=False`` (default) preserves any pre-existing type with
+        the same name and reports it under ``skipped``. ``replace=True``
+        overwrites the existing type with the parsed one.
+
+        Returns lists of imported types (with kind/size/path), skipped
+        type names, and any per-type errors emitted by the parser.
+        """
+        from ghidra.app.util.cparser.C import CParser
+        from ghidra.program.model.data import CategoryPath, DataTypeConflictHandler
+
+        if not source or not source.strip():
+            raise ValueError("source must be a non-empty C declarations string")
+
+        dtm = self.program.getDataTypeManager()
+
+        # Resolve / create the target category up front.
+        target_category = None
+        if category_path:
+            cp_str = category_path if category_path.startswith("/") else "/" + category_path
+            cp = CategoryPath(cp_str)
+            target_category = dtm.getCategory(cp) or dtm.createCategory(cp)
+
+        # Snapshot existing pathnames so we can classify each parsed type.
+        pre_existing_paths: set[str] = {str(dt.getPathName()) for dt in dtm.getAllDataTypes()}
+
+        handler = (
+            DataTypeConflictHandler.REPLACE_HANDLER
+            if replace
+            else DataTypeConflictHandler.DEFAULT_HANDLER
+        )
+
+        imported: list[dict] = []
+        skipped: list[str] = []
+        errors: list[str] = []
+
+        with ghidra_transaction(self.program, "pyghidra-mcp: import_c_types"):
+            parser = CParser(dtm, True, None)
+            try:
+                parser.parse(source)
+            except Exception as e:
+                raise ValueError(f"Failed to parse C source: {e}") from e
+
+            # Ghidra's CParser (12.x) has no getDefinedTypes(): it exposes the
+            # parsed types through per-kind maps. Union composites/enums/typedefs/
+            # function-defs, de-duplicating by path name, and iterate those.
+            defined_types: list = []
+            _seen_paths: set[str] = set()
+            for _getter in (
+                parser.getComposites,
+                parser.getEnums,
+                parser.getTypes,
+                parser.getFunctions,
+            ):
+                for dt in _getter().values():
+                    _p = str(dt.getPathName())
+                    if _p not in _seen_paths:
+                        _seen_paths.add(_p)
+                        defined_types.append(dt)
+
+            for dt in defined_types:
+                path = str(dt.getPathName())
+
+                # CParser produces a `.conflict` variant when a name collides
+                # under DEFAULT_HANDLER. Drop it and record the original as skipped.
+                if ".conflict" in path:
+                    base_path = path.split(".conflict", 1)[0]
+                    if not replace:
+                        try:
+                            dtm.remove(dt, None)
+                        except Exception as e:
+                            errors.append(f"Failed to clean up {path}: {e}")
+                        skipped.append(base_path)
+                    else:
+                        # With REPLACE_HANDLER this branch shouldn't fire; surface it if it does.
+                        errors.append(f"Unexpected conflict variant under replace=True: {path}")
+                    continue
+
+                # Pre-existing path means the parser reused (or replaced) an existing type.
+                if path in pre_existing_paths and not replace:
+                    skipped.append(path)
+                    continue
+
+                if target_category is not None:
+                    path = self._move_to_category(dt, target_category, handler)
+
+                imported.append(self._build_imported_data_type_info(dt))
+
+        self.invalidate_decompiler_cache()
+        return {
+            "imported": imported,
+            "skipped": skipped,
+            "errors": errors,
+        }
+
+    @staticmethod
+    def _classify_data_type(dt) -> str:
+        """Map a Ghidra DataType to one of our DataTypeKind string values."""
+        from ghidra.program.model.data import (
+            Array,
+            BuiltInDataType,
+            Enum as GhidraEnum,
+            FunctionDefinition,
+            Pointer,
+            Structure,
+            TypeDef,
+            Union as GhidraUnion,
+        )
+
+        if isinstance(dt, Structure):
+            return "struct"
+        if isinstance(dt, GhidraUnion):
+            return "union"
+        if isinstance(dt, GhidraEnum):
+            return "enum"
+        if isinstance(dt, Array):
+            return "array"
+        if isinstance(dt, Pointer):
+            return "pointer"
+        if isinstance(dt, TypeDef):
+            return "typedef"
+        if isinstance(dt, FunctionDefinition):
+            return "function"
+        if isinstance(dt, BuiltInDataType):
+            return "primitive"
+        return "other"
+
+    @staticmethod
+    def _category_matches(category_path: str, filter_cat: str) -> bool:
+        """True if ``category_path`` is ``filter_cat`` or a descendant of it.
+
+        Treats the category path as a directory tree:
+          - ``filter_cat="/"`` matches every type (root prefix).
+          - ``filter_cat="/MyLib"`` matches ``/MyLib`` exactly and any
+            ``/MyLib/Sub/...``, but NOT ``/MyLibrary/...``.
+          - The match is case-sensitive (Ghidra category names are identifiers).
+        """
+        if filter_cat == "/":
+            return True
+        exact = filter_cat.rstrip("/")
+        return category_path == exact or category_path.startswith(exact + "/")
+
+    @handle_exceptions
+    def search_data_types(
+        self,
+        query: str = ".*",
+        kinds: list | None = None,
+        category: str | None = None,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> list[DataTypeInfo]:
+        """Search the program's data type manager.
+
+        ``query`` is a case-insensitive regex matched against the type name.
+        ``kinds`` is an optional list of DataTypeKind values (or their string
+        equivalents). ``None`` or omitted means include every kind (including
+        primitives).
+        ``category`` is an optional DTM folder path (e.g. ``"/MyLib"``).
+        When set, results are restricted to that folder and its descendants;
+        ``"/"`` matches everything. The leading ``/`` is added if missing.
+        """
+        if not query:
+            query = ".*"
+
+        # Normalize kinds to a set of kind-string values; None means all.
+        if kinds:
+            kind_set = {k.value if hasattr(k, "value") else str(k) for k in kinds}
+        else:
+            kind_set = None
+
+        # Normalize category: strip empty, ensure leading slash.
+        if category:
+            if not category.startswith("/"):
+                category = "/" + category
+        else:
+            category = None
+
+        dtm = self.program.getDataTypeManager()
+        results: list[DataTypeInfo] = []
+
+        for dt in dtm.getAllDataTypes():
+            dt_kind = self._classify_data_type(dt)
+
+            if kind_set is not None and dt_kind not in kind_set:
+                continue
+
+            if category is not None:
+                cat_path = str(dt.getCategoryPath().getPath())
+                if not self._category_matches(cat_path, category):
+                    continue
+
+            name = str(dt.getName())
+            if not self._matches_query(query, name):
+                continue
+
+            length = int(dt.getLength())
+            results.append(
+                DataTypeInfo(
+                    name=name,
+                    kind=dt_kind,
+                    size=length if length > 0 else None,
+                    path=str(dt.getPathName()),
+                )
+            )
+
+        return results[offset : limit + offset]
+
+    @handle_exceptions
+    def search_data_items(
+        self,
+        query: str = ".*",
+        min_refcount: int | None = None,
+        max_refcount: int | None = None,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> list[DataItemInfo]:
+        """Search defined data items in the program.
+
+        Iterates ``Listing.getDefinedData(True)`` over every memory block.
+        Each match reports the label (or synthesized ``DAT_<addr>``), the
+        data type name, the byte length, and the xref refcount.
+        ``query`` is a case-insensitive regex matched against the label.
+        """
+        if not query:
+            query = ".*"
+
+        listing = self.program.getListing()
+        rm = self.program.getReferenceManager()
+        results: list[DataItemInfo] = []
+
+        for data in listing.getDefinedData(True):
+            addr = data.getAddress()
+            addr_str = str(addr)
+            refcount = int(rm.getReferenceCountTo(addr))
+
+            if min_refcount is not None and refcount < min_refcount:
+                continue
+            if max_refcount is not None and refcount > max_refcount:
+                continue
+
+            label = data.getLabel()
+            name = str(label) if label is not None else f"DAT_{addr_str}"
+            if not self._matches_query(query, name):
+                continue
+
+            dt = data.getDataType()
+            type_name = str(dt.getName()) if dt is not None else "undefined"
+
+            results.append(
+                DataItemInfo(
+                    name=name,
+                    address=addr_str,
+                    type=type_name,
+                    length=int(data.getLength()),
+                    refcount=refcount,
+                )
+            )
+
+        return results[offset : limit + offset]
+
+    def _resolve_data_type_or_raise(self, name_or_path: str, expected_kind: str):
+        """Resolve a DataType via name-or-path lookup; raise on miss / wrong kind."""
+        dtm = self.program.getDataTypeManager()
+        dt = _resolve_data_type_by_name_or_path(dtm, name_or_path)
+        if dt is None:
+            raise ValueError(f"Data type not found: {name_or_path}")
+        actual_kind = self._classify_data_type(dt)
+        if actual_kind != expected_kind:
+            raise ValueError(
+                f"Data type '{name_or_path}' is a {actual_kind}, not a {expected_kind}"
+            )
+        return dt
+
+    @handle_exceptions
+    def get_struct_layout(self, name_or_path: str) -> dict:
+        """Return the field layout of a struct identified by name or DTM path."""
+        dt = self._resolve_data_type_or_raise(name_or_path, "struct")
+        fields = []
+        for component in dt.getDefinedComponents():
+            field_name = component.getFieldName()
+            fields.append(
+                {
+                    "offset": int(component.getOffset()),
+                    "size": int(component.getLength()),
+                    "type": str(component.getDataType().getName()),
+                    "name": str(field_name) if field_name else None,
+                }
+            )
+        return {
+            "name": str(dt.getName()),
+            "path": str(dt.getPathName()),
+            "size": int(dt.getLength()),
+            "fields": fields,
+        }
+
+    @handle_exceptions
+    def get_union_layout(self, name_or_path: str) -> dict:
+        """Return the field layout of a union identified by name or DTM path."""
+        dt = self._resolve_data_type_or_raise(name_or_path, "union")
+        fields = []
+        for component in dt.getDefinedComponents():
+            field_name = component.getFieldName()
+            fields.append(
+                {
+                    "size": int(component.getLength()),
+                    "type": str(component.getDataType().getName()),
+                    "name": str(field_name) if field_name else None,
+                }
+            )
+        return {
+            "name": str(dt.getName()),
+            "path": str(dt.getPathName()),
+            "size": int(dt.getLength()),
+            "fields": fields,
+        }
+
+    @handle_exceptions
+    def get_enum_values(self, name_or_path: str) -> dict:
+        """Return the {member_name: value} map of an enum identified by name or DTM path."""
+        dt = self._resolve_data_type_or_raise(name_or_path, "enum")
+        values: dict[str, int] = {}
+        for value_name in dt.getNames():
+            values[str(value_name)] = int(dt.getValue(value_name))
+        return {
+            "name": str(dt.getName()),
+            "path": str(dt.getPathName()),
+            "size": int(dt.getLength()),
+            "values": values,
+        }
+
+    @staticmethod
+    def _lookup_struct_field(
+        struct, field_name: str | None = None, field_offset: int | None = None
+    ):
+        """Find a struct component by name or offset; raise on miss / bad input.
+
+        Exactly one of ``field_name`` or ``field_offset`` must be provided.
+        Offset lookup uses ``Structure.getComponentAt`` (returns the component
+        containing that byte, even mid-field — Ghidra's natural semantic).
+        """
+        if (field_name is None) == (field_offset is None):
+            raise ValueError("provide exactly one of field_name or field_offset")
+
+        if field_name is not None:
+            for component in struct.getDefinedComponents():
+                cname = component.getFieldName()
+                if cname is not None and str(cname) == field_name:
+                    return component
+            raise ValueError(f"Field '{field_name}' not found in struct")
+
+        component = struct.getComponentAt(int(field_offset))
+        if component is None:
+            raise ValueError(f"No field at offset {field_offset} in struct")
+        return component
+
+    @handle_exceptions
+    def add_struct_field(
+        self,
+        struct_name_or_path: str,
+        field_name: str,
+        field_type: str,
+        offset: int | None = None,
+    ) -> dict:
+        """Add a field to an existing struct.
+
+        ``offset=None`` (default) appends at the end. A specific offset
+        overlays into existing padding (or grows the struct to fit). The
+        field type is parsed via ``DataTypeParser`` so pointer/array syntax
+        is supported (``"int*"``, ``"char[16]"``).
+        """
+        if not field_name:
+            raise ValueError("field_name is required")
+        if not field_type:
+            raise ValueError("field_type is required")
+
+        struct = self._resolve_data_type_or_raise(struct_name_or_path, "struct")
+        new_dt = self._parse_data_type(field_type)
+        if new_dt is None:
+            raise ValueError(f"Unknown field type: {field_type}")
+
+        with ghidra_transaction(
+            self.program,
+            f"pyghidra-mcp: add_struct_field {struct.getName()}.{field_name}",
+        ):
+            if offset is None:
+                struct.add(new_dt, new_dt.getLength(), field_name, None)
+            else:
+                if offset < 0:
+                    raise ValueError(f"offset must be >= 0 (got {offset})")
+                needed = offset + new_dt.getLength() - struct.getLength()
+                if needed > 0:
+                    struct.growStructure(needed)
+                struct.replaceAtOffset(offset, new_dt, new_dt.getLength(), field_name, None)
+
+        self.invalidate_decompiler_cache()
+
+        # Resolve the actual placed offset (when appending we need to look it up)
+        placed = self._lookup_struct_field(struct, field_name=field_name)
+        return {
+            "struct_name": str(struct.getName()),
+            "offset": int(placed.getOffset()),
+            "struct_size": int(struct.getLength()),
+        }
+
+    @handle_exceptions
+    def set_struct_field(
+        self,
+        struct_name_or_path: str,
+        field_name: str | None = None,
+        field_offset: int | None = None,
+        new_name: str | None = None,
+        new_type: str | None = None,
+    ) -> dict:
+        """Set the name and/or type of an existing struct field.
+
+        Identify the target via ``field_name`` OR ``field_offset`` (exactly
+        one). At least one of ``new_name`` / ``new_type`` must be provided.
+        """
+        if new_name is None and new_type is None:
+            raise ValueError("nothing to modify; pass new_name or new_type")
+
+        struct = self._resolve_data_type_or_raise(struct_name_or_path, "struct")
+        component = self._lookup_struct_field(
+            struct, field_name=field_name, field_offset=field_offset
+        )
+        ordinal = int(component.getOrdinal())
+
+        with ghidra_transaction(
+            self.program,
+            f"pyghidra-mcp: set_struct_field {struct.getName()}[{ordinal}]",
+        ):
+            if new_type is not None:
+                new_dt = self._parse_data_type(new_type)
+                if new_dt is None:
+                    raise ValueError(f"Unknown field type: {new_type}")
+                struct.replace(ordinal, new_dt, new_dt.getLength())
+                # struct.replace() may return a fresh component handle
+                component = struct.getComponent(ordinal)
+
+            if new_name is not None:
+                component.setFieldName(new_name)
+
+        self.invalidate_decompiler_cache()
+        component = struct.getComponent(ordinal)
+        return {
+            "struct_name": str(struct.getName()),
+            "offset": int(component.getOffset()),
+            "struct_size": int(struct.getLength()),
+        }
+
+    @handle_exceptions
+    def delete_struct_field(
+        self,
+        struct_name_or_path: str,
+        field_name: str | None = None,
+        field_offset: int | None = None,
+    ) -> dict:
+        """Delete a field from a struct.
+
+        Identify the target via ``field_name`` OR ``field_offset`` (exactly
+        one). The struct's total size shrinks accordingly.
+        """
+        struct = self._resolve_data_type_or_raise(struct_name_or_path, "struct")
+        component = self._lookup_struct_field(
+            struct, field_name=field_name, field_offset=field_offset
+        )
+        ordinal = int(component.getOrdinal())
+        offset = int(component.getOffset())
+
+        with ghidra_transaction(
+            self.program,
+            f"pyghidra-mcp: delete_struct_field {struct.getName()}[{ordinal}]",
+        ):
+            struct.delete(ordinal)
+
+        self.invalidate_decompiler_cache()
+        return {
+            "struct_name": str(struct.getName()),
+            "offset": offset,
+            "struct_size": int(struct.getLength()),
+        }
+
     def invalidate_decompiler_cache(self) -> None:
         try:
             self.decompiler_pool.invalidate_all()
@@ -987,3 +2413,6 @@ class GhidraTools:
         if addr is None:
             raise ValueError(f"Invalid address: {address}")
         return addr
+
+
+

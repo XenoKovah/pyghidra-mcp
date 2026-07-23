@@ -204,16 +204,16 @@ pyghidra-mcp --transport streamable-http /bin/ls
 2. **Use the CLI** (in another terminal):
 ```bash
 # List available binaries
-pyghidra-mcp-cli list binaries
+pyghidra-mcp-cli list programs
 
 # Decompile a function
-pyghidra-mcp-cli decompile --binary ls main
+pyghidra-mcp-cli decompile --program ls main
 
 # Decompile with callees, referenced strings, and cross-references
-pyghidra-mcp-cli decompile --binary ls main --callees --strings --xrefs
+pyghidra-mcp-cli decompile --program ls main --callees --strings --xrefs
 
 # Search for symbols (supports regex patterns)
-pyghidra-mcp-cli search symbols --binary ls printf -l 10
+pyghidra-mcp-cli search symbols --program ls printf -l 10
 ```
 
 > [!NOTE]
@@ -399,7 +399,7 @@ Enable LLMs to perform actions, make deterministic computations, and interact wi
 ```jsonc
 // Decompile three functions in one call, with callees and xrefs attached
 {
-  "binary_name": "firmware.bin",
+  "program_name": "firmware.bin",
   "name_or_address": ["main", "init_hardware", "0x08001234"],
   "include_callees": true,
   "include_xrefs": true
@@ -407,7 +407,7 @@ Enable LLMs to perform actions, make deterministic computations, and interact wi
 
 // Get cross-references for multiple symbols at once
 {
-  "binary_name": "firmware.bin",
+  "program_name": "firmware.bin",
   "name_or_address": ["malloc", "free", "realloc"]
 }
 ```
@@ -423,52 +423,52 @@ Per-item errors are returned inline (other targets still succeed):
 
 #### Read / Analysis Tools
 
-- `search_code(binary_name: str, query: str, limit: int = 5)`: Search for code within a binary by similarity using vector embeddings.
+- `search_code(program_name: str, query: str, limit: int = 5)`: Search for code within a binary by similarity using vector embeddings.
 
-- `list_xrefs(binary_name: str, name_or_address: str | list[str])`: List cross-references to function(s), symbol(s), or address(es). Accepts a single target or a list for batch lookup.
+- `list_xrefs(program_name: str, name_or_address: str | list[str])`: List cross-references to function(s), symbol(s), or address(es). Accepts a single target or a list for batch lookup.
 
-- `gen_callgraph(binary_name: str, function_name_or_address: str, direction: str = "calling", display_type: str = "flow", include_refs: bool = True, max_depth: int | None = None, max_run_time: int = 60, condense_threshold: int = 50, top_layers: int = 5, bottom_layers: int = 5)`: Generates a MermaidJS call graph for a specified function. Supports both "calling" (functions called by the target) and "called" (functions that call the target) directions with multiple visualization types.
+- `gen_callgraph(program_name: str, function_name_or_address: str, direction: str = "calling", display_type: str = "flow", include_refs: bool = True, max_depth: int | None = None, max_run_time: int = 60, condense_threshold: int = 50, top_layers: int = 5, bottom_layers: int = 5)`: Generates a MermaidJS call graph for a specified function. Supports both "calling" (functions called by the target) and "called" (functions that call the target) directions with multiple visualization types.
 
-- `decompile_function(binary_name: str, name_or_address: str | list[str], include_callees: bool = False, include_strings: bool = False, include_xrefs: bool = False, timeout_sec: int = 30)`: Decompile function(s) by name or address. Accepts a single target or a list for batch decompilation. Rich response flags attach callees, strings, and/or xrefs to each result. `timeout_sec` applies per target and bounds each decompilation attempt independently.
+- `decompile_function(program_name: str, name_or_address: str | list[str], include_callees: bool = False, include_strings: bool = False, include_xrefs: bool = False, timeout_sec: int = 30)`: Decompile function(s) by name or address. Accepts a single target or a list for batch decompilation. Rich response flags attach callees, strings, and/or xrefs to each result. `timeout_sec` applies per target and bounds each decompilation attempt independently.
 
-- `list_exports(binary_name: str, query: str = ".*", offset: int = 0, limit: int = 25)`: Lists all exported functions and symbols from a specified binary (regex supported for query).
+- `list_exports(program_name: str, query: str = ".*", offset: int = 0, limit: int = 25)`: Lists all exported functions and symbols from a specified binary (regex supported for query).
 
-- `list_imports(binary_name: str, query: str = ".*", offset: int = 0, limit: int = 25)`: Lists all imported functions and symbols for a specified binary (regex supported for query).
+- `list_imports(program_name: str, query: str = ".*", offset: int = 0, limit: int = 25)`: Lists all imported functions and symbols for a specified binary (regex supported for query).
 
-- `read_bytes(binary_name: str, address: str, size: int = 32)`: Reads raw bytes from memory at a specified address. Returns raw hex data. Useful for inspecting memory contents, data structures, or confirming analysis findings.
+- `read_bytes(program_name: str, address: str, size: int = 32)`: Reads raw bytes from memory at a specified address. Returns raw hex data. Useful for inspecting memory contents, data structures, or confirming analysis findings.
 
-- `search_strings(binary_name: str, query: str, limit: int = 100)`: Searches for strings within a binary by name.
+- `search_strings(program_name: str, query: str, limit: int = 100)`: Searches for strings within a binary by name.
 
-- `search_symbols_by_name(binary_name: str, query: str, functions_only: bool = False, offset: int = 0, limit: int = 25)`: Search for symbols within a binary by name. Supports regex patterns (e.g. `^main$`, `func.*one`) with case-insensitive matching, or plain substring queries. Set `functions_only=True` to exclude labels, variables, and other non-function symbols.
+- `search_symbols(program_name: str, query: str = ".*", kinds: list["functions" | "globals" | "labels"] | None = None, offset: int = 0, limit: int = 100)`: Search for symbols within a binary. Supports regex patterns (e.g. `^main$`, `func.*one`) with case-insensitive matching, or plain substring queries. `kinds` optionally restricts the search to one or more kinds — `"functions"` (function symbols), `"globals"` (non-function symbols in the global namespace), `"labels"` (code/data labels). Omit `kinds` to include every symbol.
 
 #### Project Operations
 
 - `import_binary(binary_path: str)`: Imports a binary from a designated path into the current Ghidra project. If the path is a directory, it will recursively scan and import all supported binary files, preserving the directory structure within the Ghidra project.
 
-- `list_project_binaries()`: Lists binaries in the current Ghidra project. In GUI mode this includes project binaries that exist on disk even if they are not currently open in CodeBrowser.
+- `list_programs()`: Lists every program in the current Ghidra project with analysis/index status. Includes programs that are not currently open in any CodeBrowser tab. See `list_open_programs` (GUI-only) for the "what's open now" subset.
 
-- `list_project_binary_metadata(binary_name: str)`: Retrieves detailed metadata for a specific binary, including architecture, compiler, executable format, analysis metrics, and file hashes.
+- `get_program_metadata(program_name: str)`: Retrieves detailed metadata for a specific program, including architecture, compiler, executable format, analysis metrics, and file hashes.
 
-- `delete_project_binary(binary_name: str)`: Deletes a binary (program) from the Ghidra project.
+- `delete_project_binary(program_name: str)`: Deletes a binary (program) from the Ghidra project.
 
 #### Edit / Mutation Tools
 
-- `rename_function(binary_name: str, name_or_address: str, new_name: str)`: Rename a function by name or address. In GUI mode this runs as a live Ghidra transaction and updates the open program.
+- `rename_function(program_name: str, name_or_address: str, new_name: str)`: Rename a function by name or address. In GUI mode this runs as a live Ghidra transaction and updates the open program.
 
-- `rename_variable(binary_name: str, function_name_or_address: str, variable_name: str, new_name: str)`: Rename a function parameter or local variable by exact name within a specific function. If the name is missing or ambiguous within that function, the tool returns an error instead of guessing. In GUI mode this runs as a live Ghidra transaction and updates the open program.
+- `rename_variable(program_name: str, function_name_or_address: str, variable_name: str, new_name: str)`: Rename a function parameter or local variable by exact name within a specific function. If the name is missing or ambiguous within that function, the tool returns an error instead of guessing. In GUI mode this runs as a live Ghidra transaction and updates the open program.
 
-- `set_variable_type(binary_name: str, function_name_or_address: str, variable_name: str, type_name: str)`: Set the data type for a function parameter or local variable by exact name within a specific function. If the name is missing or ambiguous within that function, the tool returns an error instead of guessing. `type_name` is parsed using Ghidra's datatype parser against the program datatype manager.
+- `set_variable_type(program_name: str, function_name_or_address: str, variable_name: str, type_name: str)`: Set the data type for a function parameter or local variable by exact name within a specific function. If the name is missing or ambiguous within that function, the tool returns an error instead of guessing. `type_name` is parsed using Ghidra's datatype parser against the program datatype manager.
 
-- `set_comment(binary_name: str, target: str, comment: str, comment_type: str)`: Set a function/decompiler comment or listing comment. Supported `comment_type` values are `decompiler`, `plate`, `pre`, `eol`, `post`, and `repeatable`.
+- `set_comment(program_name: str, target: str, comment: str, comment_type: str)`: Set a function/decompiler comment or listing comment. Supported `comment_type` values are `decompiler`, `plate`, `pre`, `eol`, `post`, and `repeatable`.
 
 #### GUI Control Tools (`--gui` only)
 
 These tools are only available when `pyghidra-mcp` is started with `--gui` and control what the GUI is showing rather than mutating project data directly:
 
 - `list_open_programs()`: List programs currently open in the Ghidra GUI.
-- `open_program_in_gui(binary_name: str)`: Open a project binary in CodeBrowser.
-- `set_current_program(binary_name: str)`: Make an open program the active/current program in the primary GUI tool context.
-- `goto(binary_name: str, target: str, target_type: str)`: Navigate the Ghidra GUI to an address or function. `target_type` must be `address` or `function`.
+- `open_program_in_gui(program_name: str)`: Open a project binary in CodeBrowser.
+- `set_current_program(program_name: str)`: Make an open program the active/current program in the primary GUI tool context.
+- `goto(program_name: str, target: str, target_type: str)`: Navigate the Ghidra GUI to an address or function. `target_type` must be `address` or `function`.
 
 ### Prompts
 

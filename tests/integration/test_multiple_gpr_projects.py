@@ -63,7 +63,7 @@ async def test_open_specific_project_from_multi_project_directory(
             await session.initialize()
 
             # Should be able to list binaries (may be empty for new project)
-            results = await session.call_tool("list_project_binaries", {})
+            results = await session.call_tool("list_programs", {})
             assert results is not None
             assert len(results.content) > 0
 
@@ -89,7 +89,7 @@ async def test_open_different_project_from_same_directory(
             await session.initialize()
 
             # Should be able to list binaries
-            results = await session.call_tool("list_project_binaries", {})
+            results = await session.call_tool("list_programs", {})
             assert results is not None
             assert len(results.content) > 0
 

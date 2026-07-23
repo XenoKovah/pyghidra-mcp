@@ -8,22 +8,22 @@ from ..client import PyGhidraMcpClient
 from ..utils import format_output, handle_command_error
 
 
-def binary_option(func):
-    """Common --binary option for commands that target a specific binary."""
+def program_option(func):
+    """Common --program option for commands that target a specific program."""
     return click.option(
         "-b",
-        "--binary",
-        "binary_name",
+        "--program",
+        "program_name",
         required=True,
-        help="Binary name in the project (use 'list binaries' to see available binaries).",
+        help="Program name in the project (use 'list programs' to see available programs).",
     )(func)
 
 
 @click.command()
-@binary_option
+@program_option
 @click.argument("name_or_address")
 @click.pass_context
-def xref(ctx: click.Context, binary_name: str, name_or_address: str) -> None:
+def xref(ctx: click.Context, program_name: str, name_or_address: str) -> None:
     """List cross-references to a symbol or address in a binary."""
 
     client = PyGhidraMcpClient(
@@ -33,7 +33,7 @@ def xref(ctx: click.Context, binary_name: str, name_or_address: str) -> None:
 
     async def run():
         async with client:
-            result = await client.list_xrefs(binary_name, name_or_address)
+            result = await client.list_xrefs(program_name, name_or_address)
             format_output(result, ctx.obj["OUTPUT_FORMAT"], ctx.obj["VERBOSE"])
 
     try:

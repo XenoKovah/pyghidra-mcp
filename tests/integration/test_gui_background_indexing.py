@@ -128,7 +128,7 @@ async def test_gui_background_indexing_eventually_enables_string_search(
         env=headless_env,
     )
 
-    binary_name = PyGhidraContext._gen_unique_bin_name(test_binary)
+    program_name = PyGhidraContext._gen_unique_bin_name(test_binary)
 
     async with stdio_client(headless_params) as (read, write):
         async with ClientSession(read, write) as session:
@@ -136,8 +136,8 @@ async def test_gui_background_indexing_eventually_enables_string_search(
 
             ready = False
             for _ in range(240):
-                response = await session.call_tool("list_project_binaries", {})
-                program = find_binary_in_list_response(response, binary_name)
+                response = await session.call_tool("list_programs", {})
+                program = find_binary_in_list_response(response, program_name)
                 if program and program["analysis_complete"]:
                     ready = True
                     break
@@ -181,15 +181,15 @@ async def test_gui_background_indexing_eventually_enables_string_search(
 
                 opened = await session.call_tool(
                     "open_program_in_gui",
-                    {"binary_name": binary_name, "current": True},
+                    {"program_name": program_name, "current": True},
                 )
                 opened_payload = json.loads(opened.content[0].text)
                 assert opened_payload["current"] is True
 
                 strings_indexed = False
                 for _ in range(240):
-                    binaries = await session.call_tool("list_project_binaries", {})
-                    program = find_binary_in_list_response(binaries, binary_name)
+                    binaries = await session.call_tool("list_programs", {})
+                    program = find_binary_in_list_response(binaries, program_name)
                     if program and program["strings_indexed"]:
                         strings_indexed = True
                         break
@@ -199,7 +199,7 @@ async def test_gui_background_indexing_eventually_enables_string_search(
 
                 response = await session.call_tool(
                     "search_strings",
-                    {"binary_name": binary_name, "query": "hello"},
+                    {"program_name": program_name, "query": "hello"},
                 )
                 payload = json.loads(response.content[0].text)
                 values = [entry["value"] for entry in payload["strings"]]

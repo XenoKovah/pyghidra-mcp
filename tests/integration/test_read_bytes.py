@@ -9,7 +9,7 @@ from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 
 from pyghidra_mcp.context import PyGhidraContext
-from pyghidra_mcp.models import BytesReadResult
+from pyghidra_mcp.models import ReadBytesResponse
 
 
 @pytest.mark.asyncio
@@ -19,14 +19,14 @@ async def test_read_bytes_tool(server_params, base_address, is_macos):
         async with ClientSession(read, write) as session:
             await session.initialize()
 
-            binary_name = PyGhidraContext._gen_unique_bin_name(server_params.args[-1])
+            program_name = PyGhidraContext._gen_unique_bin_name(server_params.args[-1])
 
             # Try reading from platform-default base addresses
             response = await session.call_tool(
-                "read_bytes", {"binary_name": binary_name, "address": base_address, "size": 4}
+                "read_bytes", {"program_name": program_name, "address": base_address, "size": 4}
             )
 
-            result = BytesReadResult.model_validate_json(response.content[0].text)
+            result = ReadBytesResponse.model_validate_json(response.content[0].text)
 
             # Check magic bytes by platform
             if is_macos:

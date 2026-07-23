@@ -8,19 +8,19 @@ from ..client import PyGhidraMcpClient
 from ..utils import format_output, handle_command_error
 
 
-def binary_option(func):
-    """Common --binary option for commands that target a specific binary."""
+def program_option(func):
+    """Common --program option for commands that target a specific program."""
     return click.option(
         "-b",
-        "--binary",
-        "binary_name",
+        "--program",
+        "program_name",
         required=True,
-        help="Binary name in the project (use 'list binaries' to see available binaries).",
+        help="Program name in the project (use 'list programs' to see available programs).",
     )(func)
 
 
 @click.command()
-@binary_option
+@program_option
 @click.argument("function_name")
 @click.option(
     "-d",
@@ -64,7 +64,7 @@ def binary_option(func):
 @click.pass_context
 def callgraph(
     ctx: click.Context,
-    binary_name: str,
+    program_name: str,
     function_name: str,
     direction: str,
     display_type: str,
@@ -83,7 +83,7 @@ def callgraph(
 
         async with client:
             result = await client.gen_callgraph(
-                binary_name,
+                program_name,
                 function_name,
                 direction=direction,
                 display_type=display_type,

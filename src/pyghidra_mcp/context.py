@@ -15,7 +15,7 @@ from pyghidra_mcp.import_detection import is_ghidra_importable
 from pyghidra_mcp.import_planning import ImportCandidate, build_import_plan
 from pyghidra_mcp.indexing_mixin import IndexingMixin
 from pyghidra_mcp.models import (
-    ImportRequestResult,
+    ImportBinaryResponse,
     ProgramInfo as ProgramInfoModel,
     SkippedImport as SkippedImportModel,
 )
@@ -50,6 +50,22 @@ class ProgramInfo:
     def analysis_complete(self) -> bool:
         """Check if Ghidra analysis is complete."""
         return self.ghidra_analysis_complete
+
+
+def is_program_analysis_complete(program) -> bool:
+    """Return True if Ghidra's persisted state marks this program as analyzed.
+
+    Shared by PyGhidraContext and GuiPyGhidraContext so reopened projects don't
+    report "Analysis incomplete" for binaries already fully analyzed on a prior
+    run.
+    """
+    from ghidra.program.util import GhidraProgramUtilities
+
+    try:
+        return not bool(GhidraProgramUtilities.shouldAskToAnalyze(program))
+    except Exception:
+        logger.debug("Could not determine program analysis state", exc_info=True)
+        return False
 
 
 class PyGhidraContext(IndexingMixin):
@@ -142,6 +158,10 @@ class PyGhidraContext(IndexingMixin):
         self.programs: dict[str, ProgramInfo] = {}
         self._init_project_programs()
 
+        from pyghidra_mcp.script_jobs import ScriptJobRegistry
+
+        self.script_jobs = ScriptJobRegistry()
+
     def close(self, save: bool = True):
         """
         Saves changes to all open programs and closes the project.
@@ -153,6 +173,8 @@ class PyGhidraContext(IndexingMixin):
 
         if self.import_executor:
             self.import_executor.shutdown(wait=True)
+
+        self.script_jobs.close()
 
         for _program_name, program_info in self.programs.items():
             self._dispose_decompiler(program_info)
@@ -213,12 +235,8 @@ class PyGhidraContext(IndexingMixin):
 
         return list_folder_contents(self.project.getRootFolder())
 
-    def list_program_infos(self) -> list[ProgramInfo]:
-        """Return loaded program infos for MCP project listing."""
-        return list(self.programs.values())
-
-    def list_project_binary_infos(self) -> list[ProgramInfoModel]:
-        """Return MCP response models for project binaries."""
+    def list_program_infos(self) -> list[ProgramInfoModel]:
+        """Return MCP response models for programs in this project."""
         program_infos = []
         for name, pi in self.programs.items():
             program_infos.append(
@@ -433,7 +451,7 @@ class PyGhidraContext(IndexingMixin):
             logger.error(f"FATAL ERROR during background binary import: {e}", exc_info=True)
             raise e
 
-    def import_binary_backgrounded(self, binary_path: str | Path) -> ImportRequestResult:
+    def import_binary_backgrounded(self, binary_path: str | Path) -> ImportBinaryResponse:
         """
         Spawns a thread and imports a binary into the project.
         When the binary is analyzed it will be added to the project.
@@ -466,7 +484,7 @@ class PyGhidraContext(IndexingMixin):
             if queued_paths
             else f"No importable files were queued from {binary_path}."
         )
-        return ImportRequestResult(
+        return ImportBinaryResponse(
             requested_path=str(binary_path),
             queued_count=len(queued_paths),
             queued_paths=queued_paths,
@@ -475,21 +493,21 @@ class PyGhidraContext(IndexingMixin):
             message=message,
         )
 
-    def get_program_info(self, binary_name: str) -> "ProgramInfo":
+    def get_program_info(self, program_name: str) -> "ProgramInfo":
         """Get program info or raise ValueError if not found."""
-        program_info = self._lookup_program_info(binary_name)
+        program_info = self._lookup_program_info(program_name)
         if not program_info:
             # Exact program name not in the list
             available_progs = list(self.programs.keys())
             raise ValueError(
-                f"Binary {binary_name} not found. Available binaries: {available_progs}"
+                f"Binary {program_name} not found. Available binaries: {available_progs}"
             )
         if not program_info.analysis_complete:
             raise RuntimeError(
                 json.dumps(
                     {
-                        "message": f"Analysis incomplete for binary '{binary_name}'.",
-                        "binary_name": binary_name,
+                        "message": f"Analysis incomplete for binary '{program_name}'.",
+                        "program_name": program_name,
                         "ghidra_analysis_complete": program_info.ghidra_analysis_complete,
                         "code_indexed": program_info.code_collection is not None,
                         "strings_indexed": program_info.strings is not None,
@@ -497,18 +515,18 @@ class PyGhidraContext(IndexingMixin):
                     }
                 )
             )
-        self.schedule_indexing(binary_name)
+        self.schedule_indexing(program_name)
         return program_info
 
-    def _lookup_program_info(self, binary_name: str) -> "ProgramInfo | None":
-        program_info = self.programs.get(binary_name)
+    def _lookup_program_info(self, program_name: str) -> "ProgramInfo | None":
+        program_info = self.programs.get(program_name)
         if program_info is not None:
             return program_info
 
         available_prog_names = {
             Path(prog).name: prog_info for prog, prog_info in self.programs.items()
         }
-        return available_prog_names.get(binary_name)
+        return available_prog_names.get(program_name)
 
     def _init_program_info(self, program):
         from ghidra.program.flatapi import FlatProgramAPI
@@ -523,7 +541,7 @@ class PyGhidraContext(IndexingMixin):
             flat_api=FlatProgramAPI(program),
             decompiler_pool=self._create_decompiler_pool(program),
             metadata=metadata,
-            ghidra_analysis_complete=False,
+            ghidra_analysis_complete=is_program_analysis_complete(program),
             file_path=metadata["Executable Location"],
             load_time=time.time(),
             code_collection=None,

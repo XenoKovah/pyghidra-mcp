@@ -58,7 +58,7 @@ async def test_import_binary(
             # Initialize the connection
             await session.initialize()
 
-            test_binary_name = PyGhidraContext._gen_unique_bin_name(test_binary_for_import)
+            test_program_name = PyGhidraContext._gen_unique_bin_name(test_binary_for_import)
 
             response = await session.call_tool(
                 "import_binary", {"binary_path": test_binary_for_import}
@@ -73,8 +73,8 @@ async def test_import_binary(
                 # Try until binary is ready
                 await asyncio.sleep(1)
 
-                response = await session.call_tool("list_project_binaries", {})
-                program = find_binary_in_list_response(response, test_binary_name)
+                response = await session.call_tool("list_programs", {})
+                program = find_binary_in_list_response(response, test_program_name)
                 if not program:
                     continue
                 if program["analysis_complete"]:
@@ -92,7 +92,7 @@ async def test_import_raw_binary_single_file(
         async with ClientSession(read, write) as session:
             await session.initialize()
 
-            raw_binary_name = PyGhidraContext._gen_unique_bin_name(raw_blob_for_import)
+            raw_program_name = PyGhidraContext._gen_unique_bin_name(raw_blob_for_import)
 
             response = await session.call_tool(
                 "import_binary", {"binary_path": raw_blob_for_import}
@@ -108,10 +108,10 @@ async def test_import_raw_binary_single_file(
             for _ in range(5):
                 await asyncio.sleep(1)
 
-                response = await session.call_tool("list_project_binaries", {})
-                program = find_binary_in_list_response(response, raw_binary_name)
+                response = await session.call_tool("list_programs", {})
+                program = find_binary_in_list_response(response, raw_program_name)
                 if program:
                     imported = True
                     break
 
-            assert not imported, f"Raw binary {raw_binary_name} should have been skipped"
+            assert not imported, f"Raw binary {raw_program_name} should have been skipped"

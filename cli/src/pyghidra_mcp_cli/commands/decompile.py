@@ -8,19 +8,19 @@ from ..client import PyGhidraMcpClient
 from ..utils import format_output, handle_command_error
 
 
-def binary_option(func):
-    """Common --binary option for commands that target a specific binary."""
+def program_option(func):
+    """Common --program option for commands that target a specific program."""
     return click.option(
         "-b",
-        "--binary",
-        "binary_name",
+        "--program",
+        "program_name",
         required=True,
-        help="Binary name in the project (use 'list binaries' to see available binaries).",
+        help="Program name in the project (use 'list programs' to see available programs).",
     )(func)
 
 
 @click.command()
-@binary_option
+@program_option
 @click.argument("function_name_or_address")
 @click.option("--callees", is_flag=True, help="Include callee function names in the response.")
 @click.option("--strings", is_flag=True, help="Include referenced string literals in the response.")
@@ -28,7 +28,7 @@ def binary_option(func):
 @click.pass_context
 def decompile(
     ctx: click.Context,
-    binary_name: str,
+    program_name: str,
     function_name_or_address: str,
     callees: bool,
     strings: bool,
@@ -44,7 +44,7 @@ def decompile(
     async def run():
         async with client:
             result = await client.decompile_function(
-                binary_name,
+                program_name,
                 function_name_or_address,
                 include_callees=callees,
                 include_strings=strings,

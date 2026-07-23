@@ -8,18 +8,18 @@ from pyghidra_mcp.context import PyGhidraContext
 
 
 @pytest.mark.asyncio
-async def test_list_project_binaries_tool(server_params):
-    """Test the list_project_binaries tool."""
+async def test_list_programs_tool(server_params):
+    """Test the list_programs tool."""
 
-    binary_name = PyGhidraContext._gen_unique_bin_name(server_params.args[-1])
+    program_name = PyGhidraContext._gen_unique_bin_name(server_params.args[-1])
 
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
             # Initialize the connection
             await session.initialize()
 
-            # Call the list_project_binaries tool
-            results = await session.call_tool("list_project_binaries", {})
+            # Call the list_programs tool
+            results = await session.call_tool("list_programs", {})
 
             # Check that we got results
             assert results is not None
@@ -36,7 +36,7 @@ async def test_list_project_binaries_tool(server_params):
 
             found = False
             for program in program_infos:
-                if binary_name in program["name"]:
+                if program_name in program["name"]:
                     found = True
                     assert program["analysis_complete"]
                     break

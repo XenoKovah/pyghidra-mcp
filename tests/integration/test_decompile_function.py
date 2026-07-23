@@ -18,9 +18,9 @@ async def test_decompile_function_tool(server_params, test_binary):
 
             # Call the decompile_function tool
             try:
-                binary_name = PyGhidraContext._gen_unique_bin_name(server_params.args[-1])
+                program_name = PyGhidraContext._gen_unique_bin_name(server_params.args[-1])
                 results = await session.call_tool(
-                    "decompile_function", {"binary_name": binary_name, "name_or_address": "main"}
+                    "decompile_function", {"program_name": program_name, "name_or_address": "main"}
                 )
 
                 # Check that we got results
@@ -48,12 +48,12 @@ async def test_decompile_function_rich_response(server_params, test_binary, main
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            binary_name = PyGhidraContext._gen_unique_bin_name(server_params.args[-1])
+            program_name = PyGhidraContext._gen_unique_bin_name(server_params.args[-1])
 
             results = await session.call_tool(
                 "decompile_function",
                 {
-                    "binary_name": binary_name,
+                    "program_name": program_name,
                     "name_or_address": main_func_name,
                     "include_callees": True,
                     "include_xrefs": True,
@@ -77,12 +77,12 @@ async def test_decompile_function_batch(server_params, test_binary, func_prefix)
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            binary_name = PyGhidraContext._gen_unique_bin_name(server_params.args[-1])
+            program_name = PyGhidraContext._gen_unique_bin_name(server_params.args[-1])
 
             results = await session.call_tool(
                 "decompile_function",
                 {
-                    "binary_name": binary_name,
+                    "program_name": program_name,
                     "name_or_address": [name_one, "nonexistent_function_xyz"],
                 },
             )

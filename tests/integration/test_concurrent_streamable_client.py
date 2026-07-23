@@ -14,18 +14,18 @@ from mcp.client.streamable_http import streamable_http_client
 
 from pyghidra_mcp.context import PyGhidraContext
 from pyghidra_mcp.models import (
-    BytesReadResult,
-    CallGraphResult,
-    CodeSearchResults,
-    CommentResponse,
     CrossReferenceInfos,
     DecompiledFunction,
     ExportInfos,
+    GenCallgraphResponse,
     ImportInfos,
-    ProgramInfos,
-    RenameResponse,
-    StringSearchResults,
-    SymbolSearchResults,
+    ListProgramsResponse,
+    ReadBytesResponse,
+    RenameFunctionResponse,
+    SearchCodeResponse,
+    SearchStringsResponse,
+    SearchSymbolsResponse,
+    SetCommentResponse,
 )
 
 _IS_MACOS = platform.system() == "Darwin"
@@ -55,7 +55,7 @@ async def wait_for_server(base_url: str, timeout=120):
 
 async def wait_for_collections(base_url: str, test_binary, timeout: int = 120) -> None:
     """
-    Repeatedly call `list_project_binaries` until all programs have both
+    Repeatedly call `list_programs` until all programs have both
     collections populated, or until *timeout* seconds elapse.
     """
     deadline = time.time() + timeout
@@ -65,9 +65,9 @@ async def wait_for_collections(base_url: str, test_binary, timeout: int = 120) -
             await session.initialize()
 
             while True:
-                tool_resp = await session.call_tool("list_project_binaries", {})
+                tool_resp = await session.call_tool("list_programs", {})
                 program_infos_result = json.loads(tool_resp.content[0].text)
-                program_infos = ProgramInfos(**program_infos_result)
+                program_infos = ListProgramsResponse(**program_infos_result)
 
                 has_test_binary = any(
                     PyGhidraContext._gen_unique_bin_name(Path(test_binary)) in pi.name
@@ -148,41 +148,42 @@ async def invoke_tool_concurrently(base_url: str, server_binary_path):
     async with streamable_http_client(f"{base_url}/mcp") as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            binary_name = PyGhidraContext._gen_unique_bin_name(Path(server_binary_path))
+            program_name = PyGhidraContext._gen_unique_bin_name(Path(server_binary_path))
 
             name_one = f"{_FUNC_PREFIX}function_one"
             tasks = [
                 session.call_tool(
                     "decompile_function",
-                    {"binary_name": binary_name, "name_or_address": _MAIN_FUNC_NAME},
+                    {"program_name": program_name, "name_or_address": _MAIN_FUNC_NAME},
                 ),
                 session.call_tool(
-                    "search_symbols_by_name", {"binary_name": binary_name, "query": "function"}
+                    "search_symbols", {"program_name": program_name, "query": "function"}
                 ),
-                session.call_tool("list_project_binaries", {}),
-                session.call_tool("list_project_binary_metadata", {"binary_name": binary_name}),
-                session.call_tool("list_exports", {"binary_name": binary_name}),
-                session.call_tool("list_imports", {"binary_name": binary_name}),
+                session.call_tool("list_programs", {}),
+                session.call_tool("get_program_metadata", {"program_name": program_name}),
+                session.call_tool("list_exports", {"program_name": program_name}),
+                session.call_tool("list_imports", {"program_name": program_name}),
                 session.call_tool(
                     "list_xrefs",
-                    {"binary_name": binary_name, "name_or_address": name_one},
+                    {"program_name": program_name, "name_or_address": name_one},
                 ),
                 session.call_tool(
-                    "search_symbols_by_name", {"binary_name": binary_name, "query": "function"}
+                    "search_symbols", {"program_name": program_name, "query": "function"}
                 ),
                 session.call_tool(
-                    "search_code", {"binary_name": binary_name, "query": "Function One", "limit": 1}
+                    "search_code",
+                    {"program_name": program_name, "query": "Function One", "limit": 1},
                 ),
                 session.call_tool(
-                    "search_strings", {"binary_name": binary_name, "query": "hello", "limit": 1}
+                    "search_strings", {"program_name": program_name, "query": "hello", "limit": 1}
                 ),
                 session.call_tool(
                     "read_bytes",
-                    {"binary_name": binary_name, "address": _BASE_ADDRESS, "size": 4},
+                    {"program_name": program_name, "address": _BASE_ADDRESS, "size": 4},
                 ),
                 session.call_tool(
                     "gen_callgraph",
-                    {"binary_name": binary_name, "function_name": _MAIN_FUNC_NAME},
+                    {"program_name": program_name, "function_name": _MAIN_FUNC_NAME},
                 ),
             ]
 
@@ -194,7 +195,7 @@ async def invoke_mutation_tools(base_url: str, server_binary_path):
     async with streamable_http_client(f"{base_url}/mcp") as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            binary_name = PyGhidraContext._gen_unique_bin_name(Path(server_binary_path))
+            program_name = PyGhidraContext._gen_unique_bin_name(Path(server_binary_path))
 
             old_name = f"{_FUNC_PREFIX}function_two"
             new_name = f"{old_name}_renamed"
@@ -202,7 +203,7 @@ async def invoke_mutation_tools(base_url: str, server_binary_path):
             rename_response = await session.call_tool(
                 "rename_function",
                 {
-                    "binary_name": binary_name,
+                    "program_name": program_name,
                     "name_or_address": old_name,
                     "new_name": new_name,
                 },
@@ -210,19 +211,19 @@ async def invoke_mutation_tools(base_url: str, server_binary_path):
             comment_response = await session.call_tool(
                 "set_comment",
                 {
-                    "binary_name": binary_name,
+                    "program_name": program_name,
                     "target": new_name,
                     "comment": "Renamed during concurrent streamable integration test.",
                     "comment_type": "decompiler",
                 },
             )
             symbol_response = await session.call_tool(
-                "search_symbols_by_name",
-                {"binary_name": binary_name, "query": new_name},
+                "search_symbols",
+                {"program_name": program_name, "query": new_name},
             )
             decompile_response = await session.call_tool(
                 "decompile_function",
-                {"binary_name": binary_name, "name_or_address": new_name},
+                {"program_name": program_name, "name_or_address": new_name},
             )
 
             return rename_response, comment_response, symbol_response, decompile_response
@@ -256,14 +257,14 @@ async def test_concurrent_streamable_client_invocations(streamable_server):
 
         # Symbol search results (formerly function search results)
         search_results_result = json.loads(client_responses[1].content[0].text)
-        search_results = SymbolSearchResults(**search_results_result)
+        search_results = SearchSymbolsResponse(**search_results_result)
         assert len(search_results.symbols) >= 2
         assert any(name_one in s.name for s in search_results.symbols)
         assert any(name_two in s.name for s in search_results.symbols)
 
         # List project binaries
         program_infos_result = json.loads(client_responses[2].content[0].text)
-        program_infos = ProgramInfos(**program_infos_result)
+        program_infos = ListProgramsResponse(**program_infos_result)
         assert len(program_infos.programs) >= 1
         assert any(
             os.path.basename(streamable_binary) in program.name
@@ -302,14 +303,14 @@ async def test_concurrent_streamable_client_invocations(streamable_server):
 
         # Search symbols results
         search_symbols_result = json.loads(client_responses[7].content[0].text)
-        search_symbols = SymbolSearchResults(**search_symbols_result)
+        search_symbols = SearchSymbolsResponse(**search_symbols_result)
         assert len(search_symbols.symbols) >= 2
         assert any(name_one in s.name for s in search_symbols.symbols)
         assert any(name_two in s.name for s in search_symbols.symbols)
 
         # Search code results
         search_code_result = json.loads(client_responses[8].content[0].text)
-        code_search_results = CodeSearchResults(**search_code_result)
+        code_search_results = SearchCodeResponse(**search_code_result)
         assert len(code_search_results.results) > 0
         assert name_one in code_search_results.results[0].function_name
         # Verify new fields
@@ -322,13 +323,13 @@ async def test_concurrent_streamable_client_invocations(streamable_server):
 
         # Search strings
         search_string_result = json.loads(client_responses[9].content[0].text)
-        string_search_results = StringSearchResults(**search_string_result)
+        string_search_results = SearchStringsResponse(**search_string_result)
         assert len(string_search_results.strings) > 0
         assert any("World" in s.value for s in string_search_results.strings)
 
         # Read bytes
         read_bytes_result = json.loads(client_responses[10].content[0].text)
-        bytes_result = BytesReadResult(**read_bytes_result)
+        bytes_result = ReadBytesResponse(**read_bytes_result)
         assert bytes_result.size == 4
         if _IS_MACOS:
             assert bytes_result.data.lower() == "cffaedfe"  # Mach-O 64-bit magic (little-endian)
@@ -339,7 +340,7 @@ async def test_concurrent_streamable_client_invocations(streamable_server):
 
         # Call graph
         call_graph_result = json.loads(client_responses[11].content[0].text)
-        call_graph = CallGraphResult(**call_graph_result)
+        call_graph = GenCallgraphResponse(**call_graph_result)
         assert len(call_graph.graph) > 0
         assert _MAIN_FUNC_NAME in call_graph.function_name
         # Graph should be non-empty; entry node name may vary by platform/toolchain
@@ -355,17 +356,17 @@ async def test_concurrent_streamable_client_invocations(streamable_server):
     renamed_name = f"{_FUNC_PREFIX}function_two_renamed"
 
     rename_result = json.loads(rename_response.content[0].text)
-    rename = RenameResponse(**rename_result)
+    rename = RenameFunctionResponse(**rename_result)
     assert rename.old_name == f"{_FUNC_PREFIX}function_two"
     assert rename.new_name == renamed_name
 
     comment_result = json.loads(comment_response.content[0].text)
-    comment = CommentResponse(**comment_result)
+    comment = SetCommentResponse(**comment_result)
     assert comment.comment_type == "decompiler"
     assert comment.comment == "Renamed during concurrent streamable integration test."
 
     symbol_result = json.loads(symbol_response.content[0].text)
-    symbol_search = SymbolSearchResults(**symbol_result)
+    symbol_search = SearchSymbolsResponse(**symbol_result)
     assert any(renamed_name in symbol.name for symbol in symbol_search.symbols)
 
     decompile_result = json.loads(decompile_response.content[0].text)

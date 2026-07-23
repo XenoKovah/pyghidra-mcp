@@ -14,7 +14,7 @@ from click_option_group import optgroup
 from mcp.server import Server
 from mcp.server.fastmcp import FastMCP
 
-from pyghidra_mcp import __version__, mcp_tools
+from pyghidra_mcp import __version__, mcp_ext_tools, mcp_tools
 from pyghidra_mcp.context import PyGhidraContext
 from pyghidra_mcp.context_protocol import MCPContext
 from pyghidra_mcp.gui_context import GuiPyGhidraContext
@@ -45,33 +45,65 @@ mcp = FastMCP("pyghidra-mcp", lifespan=server_lifespan)  # type: ignore
 
 
 def register_common_tools(server: FastMCP) -> None:
+    """Register core analysis tools from mcp_tools (always enabled)."""
     server.tool()(mcp_tools.decompile_function)
-    server.tool()(mcp_tools.search_symbols_by_name)
+    server.tool()(mcp_tools.disassemble_function)
+    server.tool()(mcp_tools.search_symbols)
+    server.tool()(mcp_tools.search_functions)
     server.tool()(mcp_tools.search_code)
-    server.tool()(mcp_tools.list_project_binaries)
-    server.tool()(mcp_tools.list_project_binary_metadata)
+    server.tool()(mcp_tools.search_data_types)
+    server.tool()(mcp_tools.search_data_items)
+    server.tool()(mcp_tools.get_struct_layout)
+    server.tool()(mcp_tools.get_union_layout)
+    server.tool()(mcp_tools.get_enum_values)
+    server.tool()(mcp_tools.list_programs)
+    server.tool()(mcp_tools.create_function)
     server.tool()(mcp_tools.rename_function)
+    server.tool()(mcp_tools.save_program)
+    server.tool()(mcp_tools.set_function_prototype)
     server.tool()(mcp_tools.rename_variable)
     server.tool()(mcp_tools.set_variable_type)
     server.tool()(mcp_tools.set_comment)
-    server.tool()(mcp_tools.delete_project_binary)
-    server.tool()(mcp_tools.list_exports)
-    server.tool()(mcp_tools.list_imports)
+    server.tool()(mcp_tools.create_struct_type)
+    server.tool()(mcp_tools.create_enum_type)
+    server.tool()(mcp_tools.create_union_type)
+    server.tool()(mcp_tools.create_array_type)
+    server.tool()(mcp_tools.create_pointer_type)
+    server.tool()(mcp_tools.create_typedef)
+    server.tool()(mcp_tools.import_c_types)
+    server.tool()(mcp_tools.apply_data_type)
+    server.tool()(mcp_tools.run_inline_script)
+    server.tool()(mcp_tools.run_script)
+    server.tool()(mcp_tools.run_inline_script_async)
+    server.tool()(mcp_tools.run_script_async)
+    server.tool()(mcp_tools.poll_script_job)
+    # server.tool()(mcp_tools.delete_project_binary)
+    # server.tool()(mcp_tools.list_exports)
+    # server.tool()(mcp_tools.list_imports)
+    server.tool()(mcp_tools.list_callees)
+    server.tool()(mcp_tools.list_callers)
     server.tool()(mcp_tools.list_xrefs)
     server.tool()(mcp_tools.search_strings)
     server.tool()(mcp_tools.read_bytes)
     server.tool()(mcp_tools.gen_callgraph)
-    server.tool()(mcp_tools.import_binary)
 
 
-def register_gui_tools(server: FastMCP) -> None:
-    server.tool()(mcp_tools.list_open_programs)
-    server.tool()(mcp_tools.open_program_in_gui)
-    server.tool()(mcp_tools.set_current_program)
-    server.tool()(mcp_tools.goto)
+def register_ext_tools(server: FastMCP) -> None:
+    """Register extended project- and GUI-management tools from mcp_ext_tools.
 
-
-register_common_tools(mcp)
+    Registered only when the server is launched with --gui.
+    """
+    server.tool()(mcp_ext_tools.get_program_metadata)
+    server.tool()(mcp_ext_tools.import_binary)
+    server.tool()(mcp_ext_tools.list_open_programs)
+    server.tool()(mcp_ext_tools.open_program_in_gui)
+    server.tool()(mcp_ext_tools.set_current_program)
+    server.tool()(mcp_ext_tools.goto)
+    server.tool()(mcp_ext_tools.delete_function)
+    server.tool()(mcp_ext_tools.delete_data_type)
+    server.tool()(mcp_ext_tools.add_struct_field)
+    server.tool()(mcp_ext_tools.set_struct_field)
+    server.tool()(mcp_ext_tools.delete_struct_field)
 
 
 def init_pyghidra_context(  # noqa: C901
@@ -91,7 +123,7 @@ def init_pyghidra_context(  # noqa: C901
     threaded: bool,
     max_workers: int,
     wait_for_analysis: bool,
-    list_project_binaries: bool,
+    list_programs: bool,
     delete_project_binary: str | None,
     symbols_path: str | None,
     sym_file_path: str | None,
@@ -127,14 +159,14 @@ def init_pyghidra_context(  # noqa: C901
         sym_file_path=sym_file_path,
     )
 
-    if list_project_binaries:
-        binaries = pyghidra_context.list_binaries()
-        if binaries:
-            click.echo("Ghidra Project Binaries:")
-            for binary_name in binaries:
-                click.echo(f"- {binary_name}")
+    if list_programs:
+        programs = pyghidra_context.list_binaries()
+        if programs:
+            click.echo("Ghidra Project Programs:")
+            for program_name in programs:
+                click.echo(f"- {program_name}")
         else:
-            click.echo("No binaries found in the project.")
+            click.echo("No programs found in the project.")
         sys.exit(0)
 
     if delete_project_binary:
@@ -162,8 +194,8 @@ def init_pyghidra_context(  # noqa: C901
                     max_binaries=max(len(pyghidra_context.programs), 1)
                 )
         else:
-            for binary_name in imported_programs:
-                pyghidra_context.schedule_indexing(binary_name)
+            for program_name in imported_programs:
+                pyghidra_context.schedule_indexing(program_name)
     else:
         logger.info("Skipping full-project analysis on startup; using existing project state.")
         pyghidra_context.schedule_startup_indexing()
@@ -292,15 +324,16 @@ def run_mcp_server(mcp: FastMCP, transport: str) -> None:
     show_default=True,
     help=(
         "Launch Ghidra GUI in-process and serve MCP over HTTP against GUI-open programs. "
+        "Also registers extended project- and GUI-management tools from mcp_ext_tools. "
         "Cannot attach to an already-running external Ghidra process."
     ),
 )
 # --- Project Options ---
 @optgroup.group("Project Management")
 @optgroup.option(
-    "--list-project-binaries",
+    "--list-programs",
     is_flag=True,
-    help="List all ingested binaries in the project.",
+    help="List every program in the project with its analysis status.",
 )
 @optgroup.option(
     "--delete-project-binary",
@@ -374,7 +407,7 @@ def main(  # noqa: C901
     max_workers: int,
     wait_for_analysis: bool,
     gui: bool,
-    list_project_binaries: bool,
+    list_programs: bool,
     delete_project_binary: str | None,
     sym_file_path: str | None,
     symbols_path: str | None,
@@ -402,19 +435,22 @@ def main(  # noqa: C901
     mcp.settings.port = port
     mcp.settings.host = host
 
+    register_common_tools(mcp)
+    if gui:
+        register_ext_tools(mcp)
+
     if gui:
         if transport == "stdio":
             raise click.UsageError("--gui requires --transport streamable-http or --transport http")
         if transport == "sse":
             raise click.UsageError("--gui requires --transport streamable-http or --transport http")
-        if list_project_binaries or delete_project_binary:
+        if list_programs or delete_project_binary:
             raise click.UsageError("GUI mode does not support project-management CLI actions yet")
         if not project_spec.gpr_path.exists():
             raise click.UsageError(
                 f"GUI mode currently requires an existing Ghidra project: {project_spec.gpr_path}"
             )
 
-        register_gui_tools(mcp)
         ensure_macos_framework_python()
         launcher = GuiPyGhidraMcpLauncher(project_spec.gpr_path)
         launcher.start()
@@ -462,7 +498,7 @@ def main(  # noqa: C901
         threaded=threaded,
         max_workers=max_workers,
         wait_for_analysis=wait_for_analysis,
-        list_project_binaries=list_project_binaries,
+        list_programs=list_programs,
         delete_project_binary=delete_project_binary,
         pyghidra_mcp_dir=pyghidra_mcp_dir,
         sym_file_path=sym_file_path,

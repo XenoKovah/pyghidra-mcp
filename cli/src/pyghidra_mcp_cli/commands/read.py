@@ -8,23 +8,23 @@ from ..client import PyGhidraMcpClient
 from ..utils import format_output, handle_command_error
 
 
-def binary_option(func):
-    """Common --binary option for commands that target a specific binary."""
+def program_option(func):
+    """Common --program option for commands that target a specific program."""
     return click.option(
         "-b",
-        "--binary",
-        "binary_name",
+        "--program",
+        "program_name",
         required=True,
-        help="Binary name in the project (use 'list binaries' to see available binaries).",
+        help="Program name in the project (use 'list programs' to see available programs).",
     )(func)
 
 
 @click.command()
-@binary_option
+@program_option
 @click.argument("address")
 @click.option("-s", "--size", type=int, default=32, help="Number of bytes to read.")
 @click.pass_context
-def read(ctx: click.Context, binary_name: str, address: str, size: int) -> None:
+def read(ctx: click.Context, program_name: str, address: str, size: int) -> None:
     """Read bytes from memory at an address in a binary."""
 
     client = PyGhidraMcpClient(
@@ -34,7 +34,7 @@ def read(ctx: click.Context, binary_name: str, address: str, size: int) -> None:
 
     async def run():
         async with client:
-            result = await client.read_bytes(binary_name, address, size=size)
+            result = await client.read_bytes(program_name, address, size=size)
             format_output(result, ctx.obj["OUTPUT_FORMAT"], ctx.obj["VERBOSE"])
 
     try:

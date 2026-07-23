@@ -5,10 +5,10 @@ interface for binary analysis.
 
 Usage examples:
     # Connect to HTTP server running on default port
-    pyghidra-mcp-cli list binaries
+    pyghidra-mcp-cli list programs
 
     # Connect to server on custom port
-    pyghidra-mcp-cli --port 8080 list binaries
+    pyghidra-mcp-cli --port 8080 list programs
 
 Prerequisites:
     The pyghidra-mcp server must be running. Start it with:
@@ -45,7 +45,7 @@ Examples:
    pyghidra-mcp --transport streamable-http --wait-for-analysis ./binary1 ./binary2
 
 After starting the server, run this CLI again:
-   pyghidra-mcp-cli list binaries
+   pyghidra-mcp-cli list programs
 """
 
 
@@ -99,41 +99,41 @@ def cli(
         pyghidra-mcp --transport streamable-http --project-path /path/to/project.gpr
 
         # 2. Use the CLI
-        pyghidra-mcp-cli list binaries
+        pyghidra-mcp-cli list programs
 
     Examples:
         # List available binaries
-        pyghidra-mcp-cli list binaries
+        pyghidra-mcp-cli list programs
 
         # Decompile a function
-        pyghidra-mcp-cli decompile --binary myapp main
+        pyghidra-mcp-cli decompile --program myapp main
 
         # Search for symbols
-        pyghidra-mcp-cli search symbols --binary myapp malloc -l 20
+        pyghidra-mcp-cli search symbols --program myapp malloc -l 20
 
         # Search for code patterns
-        pyghidra-mcp-cli search code --binary myapp "AES key schedule" -l 5
+        pyghidra-mcp-cli search code --program myapp "AES key schedule" -l 5
 
         # List imports
-        pyghidra-mcp-cli list imports --binary myapp
+        pyghidra-mcp-cli list imports --program myapp
 
         # Generate call graph
-        pyghidra-mcp-cli callgraph --binary myapp main
+        pyghidra-mcp-cli callgraph --program myapp main
 
         # Read bytes at address
-        pyghidra-mcp-cli read --binary myapp 0x1000 -s 64
+        pyghidra-mcp-cli read --program myapp 0x1000 -s 64
 
         # Show cross-references
-        pyghidra-mcp-cli xref --binary myapp 0x401000
+        pyghidra-mcp-cli xref --program myapp 0x401000
 
         # Import a binary
         pyghidra-mcp-cli import /path/to/binary
 
         # Delete a binary
-        pyghidra-mcp-cli delete --binary myapp
+        pyghidra-mcp-cli delete --program myapp
 
         # Show binary metadata
-        pyghidra-mcp-cli metadata --binary myapp
+        pyghidra-mcp-cli metadata --program myapp
     """
     ctx.ensure_object(dict)
     ctx.obj["HOST"] = host

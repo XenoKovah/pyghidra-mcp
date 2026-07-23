@@ -6,7 +6,7 @@ via HTTP transport only.
 Usage:
     client = PyGhidraMcpClient(host="localhost", port=8000)
     await client.connect()
-    result = await client.list_project_binaries()
+    result = await client.list_programs()
     await client.close()
 """
 
@@ -31,8 +31,8 @@ class ServerNotRunningError(ClientError):
     pass
 
 
-class BinaryNotFoundError(ClientError):
-    """Raised when a binary is not found in the project."""
+class ProgramNotFoundError(ClientError):
+    """Raised when a program is not found in the project."""
 
     pass
 
@@ -46,7 +46,7 @@ class PyGhidraMcpClient:
 
     Usage:
         async with PyGhidraMcpClient(host="localhost", port=8000) as client:
-            result = await client.list_project_binaries()
+            result = await client.list_programs()
     """
 
     def __init__(
@@ -166,30 +166,30 @@ class PyGhidraMcpClient:
                         return json.loads(content[0]["text"])
                     except (json.JSONDecodeError, KeyError):
                         pass
-                raise BinaryNotFoundError(
+                raise ProgramNotFoundError(
                     "Binary not found. "
-                    "Run 'pyghidra-mcp-cli list binaries' to see available binaries."
+                    "Run 'pyghidra-mcp-cli list programs' to see available binaries."
                 )
             return structured
 
         if result_dict is None or (isinstance(result_dict, dict) and not result_dict):
-            raise BinaryNotFoundError(
-                "Binary not found. Run 'pyghidra-mcp-cli list binaries' to see available binaries."
+            raise ProgramNotFoundError(
+                "Program not found. Run 'pyghidra-mcp-cli list programs' to see available programs."
             )
 
         return result_dict
 
-    async def list_project_binaries(self) -> dict[str, Any]:
-        """List all binaries in the project."""
+    async def list_programs(self) -> dict[str, Any]:
+        """List every program in the project."""
         if not self._connected:
             raise ClientError("Not connected")
 
-        result = await self._session.call_tool("list_project_binaries", {})
+        result = await self._session.call_tool("list_programs", {})
         return self._extract_result(result)
 
     async def decompile_function(
         self,
-        binary_name: str,
+        program_name: str,
         function_name_or_address: str,
         include_callees: bool = False,
         include_strings: bool = False,
@@ -200,7 +200,7 @@ class PyGhidraMcpClient:
             raise ClientError("Not connected")
 
         args: dict[str, Any] = {
-            "binary_name": binary_name,
+            "program_name": program_name,
             "name_or_address": function_name_or_address,
         }
         if include_callees:
@@ -219,31 +219,35 @@ class PyGhidraMcpClient:
 
     async def search_symbols(
         self,
-        binary_name: str,
-        query: str,
-        functions_only: bool = False,
+        program_name: str,
+        query: str = ".*",
+        kinds: list[str] | None = None,
         offset: int = 0,
-        limit: int = 25,
+        limit: int = 100,
     ) -> dict[str, Any]:
-        """Search for symbols by name."""
+        """Search for symbols by name, optionally filtered to one or more kinds.
+
+        ``kinds`` accepts a list of any of: "functions", "globals", "labels".
+        Pass ``None`` or omit to include every symbol.
+        """
         if not self._connected:
             raise ClientError("Not connected")
 
         args: dict[str, Any] = {
-            "binary_name": binary_name,
+            "program_name": program_name,
             "query": query,
             "offset": offset,
             "limit": limit,
         }
-        if functions_only:
-            args["functions_only"] = True
+        if kinds is not None:
+            args["kinds"] = list(kinds)
 
-        result = await self._session.call_tool("search_symbols_by_name", args)
+        result = await self._session.call_tool("search_symbols", args)
         return self._extract_result(result)
 
     async def search_code(
         self,
-        binary_name: str,
+        program_name: str,
         query: str,
         limit: int = 5,
         offset: int = 0,
@@ -259,7 +263,7 @@ class PyGhidraMcpClient:
         result = await self._session.call_tool(
             "search_code",
             {
-                "binary_name": binary_name,
+                "program_name": program_name,
                 "query": query,
                 "limit": limit,
                 "offset": offset,
@@ -272,7 +276,7 @@ class PyGhidraMcpClient:
         return self._extract_result(result)
 
     async def search_strings(
-        self, binary_name: str, query: str, limit: int = 100
+        self, program_name: str, query: str, limit: int = 100
     ) -> dict[str, Any]:
         """Search for strings in the binary."""
         if not self._connected:
@@ -280,12 +284,12 @@ class PyGhidraMcpClient:
 
         result = await self._session.call_tool(
             "search_strings",
-            {"binary_name": binary_name, "query": query, "limit": limit},
+            {"program_name": program_name, "query": query, "limit": limit},
         )
         return self._extract_result(result)
 
     async def list_imports(
-        self, binary_name: str, query: str = ".*", offset: int = 0, limit: int = 25
+        self, program_name: str, query: str = ".*", offset: int = 0, limit: int = 25
     ) -> dict[str, Any]:
         """List imports in the binary."""
         if not self._connected:
@@ -293,12 +297,12 @@ class PyGhidraMcpClient:
 
         result = await self._session.call_tool(
             "list_imports",
-            {"binary_name": binary_name, "query": query, "offset": offset, "limit": limit},
+            {"program_name": program_name, "query": query, "offset": offset, "limit": limit},
         )
         return self._extract_result(result)
 
     async def list_exports(
-        self, binary_name: str, query: str = ".*", offset: int = 0, limit: int = 25
+        self, program_name: str, query: str = ".*", offset: int = 0, limit: int = 25
     ) -> dict[str, Any]:
         """List exports in the binary."""
         if not self._connected:
@@ -306,18 +310,18 @@ class PyGhidraMcpClient:
 
         result = await self._session.call_tool(
             "list_exports",
-            {"binary_name": binary_name, "query": query, "offset": offset, "limit": limit},
+            {"program_name": program_name, "query": query, "offset": offset, "limit": limit},
         )
         return self._extract_result(result)
 
-    async def list_xrefs(self, binary_name: str, name_or_address: str) -> dict[str, Any]:
+    async def list_xrefs(self, program_name: str, name_or_address: str) -> dict[str, Any]:
         """List cross-references to a symbol or address."""
         if not self._connected:
             raise ClientError("Not connected")
 
         result = await self._session.call_tool(
             "list_xrefs",
-            {"binary_name": binary_name, "name_or_address": name_or_address},
+            {"program_name": program_name, "name_or_address": name_or_address},
         )
         extracted = self._extract_result(result)
         # Server returns list[CrossReferenceInfos]; unwrap single-item batch
@@ -325,20 +329,20 @@ class PyGhidraMcpClient:
             return extracted["result"][0]
         return extracted
 
-    async def read_bytes(self, binary_name: str, address: str, size: int = 32) -> dict[str, Any]:
+    async def read_bytes(self, program_name: str, address: str, size: int = 32) -> dict[str, Any]:
         """Read bytes from memory."""
         if not self._connected:
             raise ClientError("Not connected")
 
         result = await self._session.call_tool(
             "read_bytes",
-            {"binary_name": binary_name, "address": address, "size": size},
+            {"program_name": program_name, "address": address, "size": size},
         )
         return self._extract_result(result)
 
     async def gen_callgraph(
         self,
-        binary_name: str,
+        program_name: str,
         function_name: str,
         direction: str = "calling",
         display_type: str = "flow",
@@ -354,7 +358,7 @@ class PyGhidraMcpClient:
         result = await self._session.call_tool(
             "gen_callgraph",
             {
-                "binary_name": binary_name,
+                "program_name": program_name,
                 "function_name": function_name,
                 "direction": direction,
                 "display_type": display_type,
@@ -377,24 +381,24 @@ class PyGhidraMcpClient:
         )
         return self._extract_result(result)
 
-    async def delete_binary(self, binary_name: str) -> dict[str, Any]:
+    async def delete_binary(self, program_name: str) -> dict[str, Any]:
         """Delete a binary from the project."""
         if not self._connected:
             raise ClientError("Not connected")
 
         result = await self._session.call_tool(
             "delete_project_binary",
-            {"binary_name": binary_name},
+            {"program_name": program_name},
         )
         return self._extract_result(result)
 
-    async def list_project_binary_metadata(self, binary_name: str) -> dict[str, Any]:
-        """Get metadata for a binary."""
+    async def get_program_metadata(self, program_name: str) -> dict[str, Any]:
+        """Get metadata for a program."""
         if not self._connected:
             raise ClientError("Not connected")
 
         result = await self._session.call_tool(
-            "list_project_binary_metadata",
-            {"binary_name": binary_name},
+            "get_program_metadata",
+            {"program_name": program_name},
         )
         return self._extract_result(result)

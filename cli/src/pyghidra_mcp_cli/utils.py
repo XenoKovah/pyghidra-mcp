@@ -126,26 +126,26 @@ def handle_command_error(
     if handle_noisy_mcp_errors(error_msg):
         return
 
-    # Check if this is a binary not found error with available binaries
+    # Check if this is a program-not-found error with an available-programs list
     if "not found" in error_msg.lower():
         import ast
         import re
 
-        # Look for pattern like ['binary1', 'binary2', ...]
-        binaries_match = re.search(r"\[[^\]]*\]", error_msg)
+        # Look for pattern like ['program1', 'program2', ...]
+        programs_match = re.search(r"\[[^\]]*\]", error_msg)
 
-        if binaries_match:
-            binaries_str = binaries_match.group()
+        if programs_match:
+            programs_str = programs_match.group()
             try:
                 # Try to parse as Python list
-                binaries = ast.literal_eval(binaries_str)
-                if isinstance(binaries, list) and binaries:
-                    click.echo("Error: Binary not found.", err=True)
-                    click.echo("\nAvailable binaries:", err=True)
-                    for name in binaries[:10]:
+                programs = ast.literal_eval(programs_str)
+                if isinstance(programs, list) and programs:
+                    click.echo("Error: Program not found.", err=True)
+                    click.echo("\nAvailable programs:", err=True)
+                    for name in programs[:10]:
                         click.echo(f"  - {name}", err=True)
-                    if len(binaries) > 10:
-                        click.echo(f"  ... and {len(binaries) - 10} more", err=True)
+                    if len(programs) > 10:
+                        click.echo(f"  ... and {len(programs) - 10} more", err=True)
                     return
             except (ValueError, SyntaxError):
                 pass
@@ -153,12 +153,12 @@ def handle_command_error(
         # If we can't extract from error message, show the message
         click.echo(f"Error: {error_msg}", err=True)
 
-    elif error.__class__.__name__ == "BinaryNotFoundError":
+    elif error.__class__.__name__ == "ProgramNotFoundError":
         click.echo(f"Error: {error}", err=True)
 
-        # Always try to show available binaries for BinaryNotFoundError
+        # Always try to show available programs for ProgramNotFoundError
         if ctx:
-            click.echo("\nAvailable binaries:", err=True)
+            click.echo("\nAvailable programs:", err=True)
             try:
                 from .client import PyGhidraMcpClient
 
@@ -167,20 +167,20 @@ def handle_command_error(
                     port=ctx.obj.get("PORT", 8000),
                 )
 
-                async def show_binaries():
+                async def show_programs():
                     async with client:
-                        result = await client.list_project_binaries()
+                        result = await client.list_programs()
                         programs = result.get("programs", [])
                         if programs:
                             for prog in programs:
                                 name = prog.get("name", "unknown")
                                 click.echo(f"  - {name}", err=True)
                         else:
-                            click.echo("  No binaries found in project.", err=True)
+                            click.echo("  No programs found in project.", err=True)
 
-                run_async(show_binaries())
+                run_async(show_programs())
             except Exception:
-                click.echo("  (Could not fetch binary list)", err=True)
+                click.echo("  (Could not fetch program list)", err=True)
 
     elif error.__class__.__name__ == "ClientError":
         click.echo(f"Error: {error}", err=True)

@@ -57,16 +57,6 @@ def test_init_project_programs_uses_domain_file_paths(monkeypatch):
     }
 
 
-def test_list_program_infos_returns_loaded_programs():
-    context = PyGhidraContext.__new__(PyGhidraContext)
-    context.programs = {
-        "/one": "one-info",
-        "/two": "two-info",
-    }
-
-    assert context.list_program_infos() == ["one-info", "two-info"]
-
-
 def test_get_program_info_schedules_indexing_for_ready_binary():
     context = PyGhidraContext.__new__(PyGhidraContext)
     program_info = Mock()

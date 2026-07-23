@@ -19,11 +19,11 @@ async def test_list_xrefs(server_params, func_prefix, main_func_name):
         async with ClientSession(read, write) as session:
             await session.initialize()
 
-            binary_name = PyGhidraContext._gen_unique_bin_name(server_params.args[-1])
+            program_name = PyGhidraContext._gen_unique_bin_name(server_params.args[-1])
 
             response = await session.call_tool(
                 "list_xrefs",
-                {"binary_name": binary_name, "name_or_address": name_one},
+                {"program_name": program_name, "name_or_address": name_one},
             )
 
             # FastMCP serializes each list item as a separate content block
@@ -46,12 +46,12 @@ async def test_list_xrefs_batch(server_params, func_prefix):
         async with ClientSession(read, write) as session:
             await session.initialize()
 
-            binary_name = PyGhidraContext._gen_unique_bin_name(server_params.args[-1])
+            program_name = PyGhidraContext._gen_unique_bin_name(server_params.args[-1])
 
             response = await session.call_tool(
                 "list_xrefs",
                 {
-                    "binary_name": binary_name,
+                    "program_name": program_name,
                     "name_or_address": [name_one, "nonexistent_symbol_xyz"],
                 },
             )

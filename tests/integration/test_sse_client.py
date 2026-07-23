@@ -89,13 +89,13 @@ async def test_sse_client_smoke(sse_server, main_func_name):
             await session.initialize()
             # Session initialized
 
-            binary_name = PyGhidraContext._gen_unique_bin_name(sse_binary)
+            program_name = PyGhidraContext._gen_unique_bin_name(sse_binary)
 
             # Decompile a function
             name = main_func_name
             results = await session.call_tool(
                 "decompile_function",
-                {"binary_name": binary_name, "name_or_address": name},
+                {"program_name": program_name, "name_or_address": name},
             )
             # We have results!
             assert results is not None

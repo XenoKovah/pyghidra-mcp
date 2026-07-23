@@ -93,13 +93,13 @@ async def test_streamable_client_smoke(streamable_server, main_func_name):
             await session.initialize()
             # Session initialized
 
-            binary_name = PyGhidraContext._gen_unique_bin_name(streamable_binary)
+            program_name = PyGhidraContext._gen_unique_bin_name(streamable_binary)
 
             # Decompile a function
             name = main_func_name
             results = await session.call_tool(
                 "decompile_function",
-                {"binary_name": binary_name, "name_or_address": name},
+                {"program_name": program_name, "name_or_address": name},
             )
             # We have results!
             assert results is not None

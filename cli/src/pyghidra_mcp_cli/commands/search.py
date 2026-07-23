@@ -6,14 +6,14 @@ from ..client import PyGhidraMcpClient
 from ..utils import format_output, handle_command_error
 
 
-def binary_option(func):
-    """Common --binary option for commands that target a specific binary."""
+def program_option(func):
+    """Common --program option for commands that target a specific program."""
     return click.option(
         "-b",
-        "--binary",
-        "binary_name",
+        "--program",
+        "program_name",
         required=True,
-        help="Binary name in the project (use 'list binaries' to see available binaries).",
+        help="Program name in the project (use 'list programs' to see available programs).",
     )(func)
 
 
@@ -24,16 +24,29 @@ def search() -> None:
 
 
 @search.command(name="symbols")
-@binary_option
-@click.argument("query")
+@program_option
+@click.argument("query", required=False, default=".*")
 @click.option("-o", "--offset", type=int, default=0, help="Offset for pagination.")
-@click.option("-l", "--limit", type=int, default=25, help="Maximum results to return.")
+@click.option("-l", "--limit", type=int, default=100, help="Maximum results to return.")
 @click.option(
-    "-f", "--functions-only", is_flag=True, default=False, help="Search only function symbols."
+    "-k",
+    "--kind",
+    "kinds",
+    type=click.Choice(["functions", "globals", "labels"], case_sensitive=False),
+    multiple=True,
+    help=(
+        "Restrict to one or more symbol kinds; pass the flag multiple times. "
+        "Omit to include every symbol."
+    ),
 )
 @click.pass_context
 def symbols(
-    ctx: click.Context, binary_name: str, query: str, offset: int, limit: int, functions_only: bool
+    ctx: click.Context,
+    program_name: str,
+    query: str,
+    offset: int,
+    limit: int,
+    kinds: tuple[str, ...],
 ) -> None:
     """Search for symbols by name in a binary."""
 
@@ -45,7 +58,11 @@ def symbols(
     async def run():
         async with client:
             result = await client.search_symbols(
-                binary_name, query, functions_only=functions_only, offset=offset, limit=limit
+                program_name,
+                query,
+                kinds=list(kinds) if kinds else None,
+                offset=offset,
+                limit=limit,
             )
             format_output(result, ctx.obj["OUTPUT_FORMAT"], ctx.obj["VERBOSE"])
 
@@ -60,7 +77,7 @@ def symbols(
 
 
 @search.command(name="code")
-@binary_option
+@program_option
 @click.argument("query")
 @click.option("-l", "--limit", type=int, default=5, help="Maximum results to return.")
 @click.option("-o", "--offset", type=int, default=0, help="Offset for pagination.")
@@ -94,7 +111,7 @@ def symbols(
 @click.pass_context
 def code(
     ctx: click.Context,
-    binary_name: str,
+    program_name: str,
     query: str,
     limit: int,
     offset: int,
@@ -113,7 +130,7 @@ def code(
     async def run():
         async with client:
             result = await client.search_code(
-                binary_name,
+                program_name,
                 query,
                 limit=limit,
                 offset=offset,
@@ -135,11 +152,11 @@ def code(
 
 
 @search.command(name="strings")
-@binary_option
+@program_option
 @click.argument("query")
 @click.option("-l", "--limit", type=int, default=100, help="Maximum results to return.")
 @click.pass_context
-def strings(ctx: click.Context, binary_name: str, query: str, limit: int) -> None:
+def strings(ctx: click.Context, program_name: str, query: str, limit: int) -> None:
     """Search for strings in a binary."""
 
     client = PyGhidraMcpClient(
@@ -149,7 +166,7 @@ def strings(ctx: click.Context, binary_name: str, query: str, limit: int) -> Non
 
     async def run():
         async with client:
-            result = await client.search_strings(binary_name, query, limit=limit)
+            result = await client.search_strings(program_name, query, limit=limit)
             format_output(result, ctx.obj["OUTPUT_FORMAT"], ctx.obj["VERBOSE"])
 
     import asyncio

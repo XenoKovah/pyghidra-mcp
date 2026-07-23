@@ -222,14 +222,14 @@ def server_params_shared_object(test_shared_object, ghidra_env, isolated_project
 
 @pytest.fixture()
 def find_binary_in_list_response():
-    """Return a helper that finds a binary by generated name in a list_project_binaries response."""
+    """Return a helper that finds a binary by generated name in a list_programs response."""
 
-    def _finder(response, binary_name):
+    def _finder(response, program_name):
         text_content = response.content[0].text
         program_infos = json.loads(text_content)["programs"]
 
         for program in program_infos:
-            if binary_name in program["name"]:
+            if program_name in program["name"]:
                 return program
 
         return None

@@ -3,7 +3,7 @@ from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 
 from pyghidra_mcp.context import PyGhidraContext
-from pyghidra_mcp.models import SymbolSearchResults
+from pyghidra_mcp.models import SearchSymbolsResponse
 
 
 @pytest.mark.asyncio
@@ -16,14 +16,14 @@ async def test_search_functions_by_name(server_params, func_prefix):
         async with ClientSession(read, write) as session:
             await session.initialize()
 
-            binary_name = PyGhidraContext._gen_unique_bin_name(server_params.args[-1])
+            program_name = PyGhidraContext._gen_unique_bin_name(server_params.args[-1])
 
             response = await session.call_tool(
-                "search_symbols_by_name",
-                {"binary_name": binary_name, "query": "function_", "functions_only": True},
+                "search_symbols",
+                {"program_name": program_name, "query": "function_", "kinds": ["functions"]},
             )
 
-            search_results = SymbolSearchResults.model_validate_json(response.content[0].text)
+            search_results = SearchSymbolsResponse.model_validate_json(response.content[0].text)
             assert len(search_results.symbols) >= 2
             assert any(name_one in s.name for s in search_results.symbols)
             assert any(name_two in s.name for s in search_results.symbols)
